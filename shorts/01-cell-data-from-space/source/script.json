@@ -1,0 +1,17 @@
+[
+ {"say":"Your phone just talked to something moving seventeen thousand miles an hour.",
+  "show":[["Your",1],["phone",1],["just",1],["talked",1],["to",1],["something",1],["moving",1],["17,000",3,"seventeen thousand"],["MPH",3,"miles an hour"]], "gap":0.18},
+ {"say":"It's a cell tower... in space.", "show":[["It's",1],["a",1],["cell",1],["tower...",1],["in",1],["SPACE.",1]], "gap":0.3},
+ {"say":"A few hundred miles up, thousands of satellites are falling around Earth. Nonstop.",
+  "show":[["A",1],["few",1],["hundred",1],["miles",1],["up,",1],["thousands",1],["of",1],["satellites",1],["are",1],["FALLING",1],["around",1],["Earth.",1],["Nonstop.",1]], "gap":0.2},
+ {"say":"They fly sideways so fast, they keep missing the ground. That's an orbit.",
+  "show":[["They",1],["fly",1],["sideways",1],["so",1],["fast,",1],["they",1],["keep",1],["MISSING",1],["the",1],["ground.",1],["That's",1],["an",1],["ORBIT.",1]], "gap":0.25},
+ {"say":"Your phone fires radio waves, light you can't see, straight up.",
+  "show":[["Your",1],["phone",1],["fires",1],["RADIO",1],["WAVES,",1],["light",1],["you",1],["can't",1],["see,",1],["straight",1],["up.",1]], "gap":0.2},
+ {"say":"A satellite catches it, and passes it to the next one... with lasers.",
+  "show":[["A",1],["satellite",1],["catches",1],["it,",1],["and",1],["passes",1],["it",1],["to",1],["the",1],["next",1],["one...",1],["with",1],["LASERS.",1]], "gap":0.2},
+ {"say":"Down to a ground station, into the internet, and back to you.",
+  "show":[["Down",1],["to",1],["a",1],["ground",1],["station,",1],["into",1],["the",1],["internet,",1],["and",1],["back",1],["to",1],["YOU.",1]], "gap":0.2},
+ {"say":"Faster than you can blink.", "show":[["Faster",1],["than",1],["you",1],["can",1],["BLINK.",1]], "gap":0.45},
+ {"say":"So next time you've got no bars... look up.", "show":[["So",1],["next",1],["time",1],["you've",1],["got",1],["no",1],["bars...",1],["LOOK",1],["UP.",1]], "gap":0.0}
+]
