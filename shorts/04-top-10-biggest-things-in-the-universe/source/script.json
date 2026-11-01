@@ -1,0 +1,14 @@
+[
+ {"id":"hook","say":"You think Earth is big? Watch it disappear.","gap":0.15},
+ {"id":"10","say":"Jupiter. Eleven Earths fit side by side across it.","gap":0.25},
+ {"id":"9","say":"The Sun. A hundred and nine Earths wide, and over ninety nine percent of the Solar System's mass.","gap":0.25},
+ {"id":"8","say":"Rigel. A blue supergiant, seventy nine times wider than the Sun.","gap":0.25},
+ {"id":"7","say":"Betelgeuse. Put it where the Sun is, and it swallows Mars.","gap":0.25},
+ {"id":"6","say":"Stephenson two eighteen. Possibly the biggest star known. It would reach past Jupiter.","gap":0.25},
+ {"id":"5","say":"Our entire Solar System, out to Neptune. Light needs eight hours to cross it.","gap":0.25},
+ {"id":"4","say":"The Orion Nebula. Twenty four light years of glowing gas, where stars are born.","gap":0.25},
+ {"id":"3","say":"The Milky Way. A hundred thousand light years, and hundreds of billions of stars. We're right here.","gap":0.25},
+ {"id":"2","say":"Laniakea, our supercluster. A hundred thousand galaxies, five hundred twenty million light years wide.","gap":0.3},
+ {"id":"1","say":"And number one. The observable universe. Ninety three billion light years. And it might be a tiny piece of everything.","gap":0.35},
+ {"id":"outro","say":"Which one broke your brain? Tell me in the comments.","gap":0.0}
+]
