@@ -1,0 +1,16 @@
+[
+ {"id":"hook","say":"Here's how to fly past four planets, starting in your garage.","gap":0.2},
+ {"id":"s1","say":"Step one. Buy a Titan Three E Centaur rocket. It's sixteen stories tall, so... measure the garage.","gap":0.2},
+ {"id":"s2","say":"Step two. Solar panels won't cut it out by Neptune, so grab three plutonium generators. Normal garage stuff.","gap":0.2},
+ {"id":"s3","say":"Step three. A computer with sixty nine kilobytes of memory. That's smaller than one selfie.","gap":0.2},
+ {"id":"s4","say":"Step four. A golden record. Whale songs, and Chuck Berry, in case aliens like rock and roll.","gap":0.2},
+ {"id":"s5","say":"Step five. Wait for the planets to line up. It only happens every hundred and seventy five years.","gap":0.2},
+ {"id":"s6","say":"Step six. Roll it to your backyard. Ideally, your backyard is Cape Canaveral.","gap":0.25},
+ {"id":"launch","say":"August twentieth, nineteen seventy seven. Boosters, two Titan stages, Centaur, kick motor. Bye, Earth.","gap":0.3},
+ {"id":"jup","say":"Jupiter. Swing past and steal some of its speed. That's a gravity assist.","gap":0.2},
+ {"id":"sat","say":"Saturn. Do it again.","gap":0.3},
+ {"id":"ura","say":"Uranus. Nobody had ever been here. Nobody has since.","gap":0.2},
+ {"id":"nep","say":"Neptune. Its moon Triton is shooting geysers.","gap":0.3},
+ {"id":"end","say":"Then keep going. Forty nine years later, over thirteen billion miles out, it's still flying.","gap":0.3},
+ {"id":"final","say":"Last step. Tell your neighbors it was a weather balloon.","gap":0.0}
+]
