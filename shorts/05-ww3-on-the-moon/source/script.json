@@ -1,0 +1,122 @@
+[
+ {
+  "id": "hook",
+  "say": "March, twenty forty nine. The first war in space just broke out. And it started over ice.",
+  "gap": 0.35
+ },
+ {
+  "id": "teams",
+  "say": "Fourteen nations now live on the Moon. The Artemis Coalition: America, Britain, France, Italy, Israel, South Korea, Australia and New Zealand.",
+  "gap": 0.15
+ },
+ {
+  "id": "pact",
+  "say": "Against them, the Lunar Pact: China, Russia, North Korea and Iran. India and Brazil stay neutral.",
+  "gap": 0.3
+ },
+ {
+  "id": "ice",
+  "say": "Everyone wants the same thing: frozen water, hidden in the dark craters of the south pole. Water means air, fuel, and power.",
+  "gap": 0.3
+ },
+ {
+  "id": "incident",
+  "say": "Day one. At Shackleton crater, an American mining rover and a Chinese one claim the same ice field. Nobody backs down.",
+  "gap": 0.35
+ },
+ {
+  "id": "strike",
+  "say": "Day three. The Pact strikes first. Chinese and Russian armored rovers pour over from the far side, and seize Shoemaker and Haworth craters.",
+  "gap": 0.3
+ },
+ {
+  "id": "physics",
+  "say": "On the Moon, there's no air. No smoke, no sound. And a shell flies six times farther than on Earth.",
+  "gap": 0.3
+ },
+ {
+  "id": "digin",
+  "say": "The Coalition digs in on Shackleton's rim. British and French engineers turn ice mines into fortresses.",
+  "gap": 0.3
+ },
+ {
+  "id": "earth",
+  "say": "Back on Earth, everything spirals. Satellites go dark. Markets crash. Warships face off in the Pacific.",
+  "gap": 0.3
+ },
+ {
+  "id": "india",
+  "say": "Day nineteen. Pact artillery hits India's base at Shiv Shakti point. India joins the Coalition.",
+  "gap": 0.3
+ },
+ {
+  "id": "crisium",
+  "say": "Day twenty four. A surprise. North Korean landers touch down in Mare Crisium. Australia, New Zealand and South Korea race north to stop them.",
+  "gap": 0.25
+ },
+ {
+  "id": "crisium2",
+  "say": "The battle of Crisium lasts nine days. The landers run out of oxygen before they run out of ammo.",
+  "gap": 0.3
+ },
+ {
+  "id": "massdriver",
+  "say": "Day thirty one. On the far side, Russia switches on a mass driver: a magnetic railway that flings rocks into orbit. Every Coalition satellite is now a target.",
+  "gap": 0.3
+ },
+ {
+  "id": "raid",
+  "say": "Day thirty five. British and Israeli commandos cross the far side in total darkness, and blow the mass driver apart.",
+  "gap": 0.35
+ },
+ {
+  "id": "counter",
+  "say": "Day forty. The Coalition counterattacks. American and Israeli brigades push south from Tranquility Base, and retake Haworth crater.",
+  "gap": 0.3
+ },
+ {
+  "id": "iran",
+  "say": "Iran sends supply ships around the far side. But every convoy takes three days. The Pact is running dry.",
+  "gap": 0.3
+ },
+ {
+  "id": "stalemate",
+  "say": "Day sixty two. The front freezes along the rim of the south pole. Neither side can move. Neither side can win.",
+  "gap": 0.3
+ },
+ {
+  "id": "lastpush",
+  "say": "Day seventy. The Pact throws everything at de Gerlache crater. The offensive collapses in six hours.",
+  "gap": 0.3
+ },
+ {
+  "id": "totals",
+  "say": "Almost twenty thousand troops committed. Over four thousand casualties. For a few billion tons of ice.",
+  "gap": 0.35
+ },
+ {
+  "id": "storm",
+  "say": "Then the Sun steps in. A massive solar storm floods the Moon with radiation. Both armies hide underground for a week. Nobody fights. And that's when the phones start ringing.",
+  "gap": 0.35
+ },
+ {
+  "id": "talks",
+  "say": "Then Brazil invites everyone to Rio. Forty days of talks.",
+  "gap": 0.3
+ },
+ {
+  "id": "treaty",
+  "say": "The Treaty of Tranquility. The poles become a shared zone. The ice belongs to everyone. And weapons are banned from the Moon. Forever.",
+  "gap": 0.35
+ },
+ {
+  "id": "end",
+  "say": "The first war in space ended exactly where it started. Over water.",
+  "gap": 0.3
+ },
+ {
+  "id": "cta",
+  "say": "Which side would you have joined? Tell me in the comments.",
+  "gap": 0.0
+ }
+]

@@ -1,0 +1,597 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>html,body{margin:0;background:#000}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+const W = 1080, H = 1920, DEG = Math.PI / 180, END = 176.0;
+const VO = await (await fetch('vo.json')).json();
+const SEG = {}; VO.segs.forEach(s => SEG[s.id] = s);
+const ST = {}; VO.segs.forEach((s, i) => ST[s.id] = i ? s.s : 0);
+const Wd = (sid, w, n = 0) => SEG[sid].words.filter(x => x.w.replace(/[.,?:!]/g, '').toLowerCase().startsWith(w.toLowerCase()))[n].s;
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const ss = (a, b, x) => { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+const ease = t => { t = clamp(t); return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+const easeOut = t => 1 - Math.pow(1 - clamp(t), 3);
+function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+const hash = (a, b) => { const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return x - Math.floor(x); };
+const geo = (lat, lon, r = 1) => new THREE.Vector3(r * Math.cos(lat * DEG) * Math.cos(lon * DEG), r * Math.sin(lat * DEG), -r * Math.cos(lat * DEG) * Math.sin(lon * DEG));
+function slerpLL(a, b, u) { const A = geo(a[0], a[1]), B = geo(b[0], b[1]); const q = new THREE.Quaternion().setFromUnitVectors(A, B); const id = new THREE.Quaternion(); id.slerp(q, u); const p = A.clone().applyQuaternion(id); return [Math.asin(clamp(p.y, -1, 1)) / DEG, Math.atan2(-p.z, p.x) / DEG]; }
+
+// ---------------- places (real lunar coordinates) ----------------
+const P = {
+  SHACKLETON: [-89.7, 0], HAWORTH: [-87.4, -5.0], SHOEMAKER: [-88.1, 44.9], FAUSTINI: [-87.3, 77.0], DEGERLACHE: [-88.5, -87.1], MALAPERT: [-86.0, 2.7],
+  NOBILE: [-85.2, 53.5], AMUNDSEN: [-84.4, 85.6], CABEUS: [-85.3, -42.1], SHIVSHAKTI: [-69.37, 32.32], TYCHO: [-43.3, -11.2], TRANQUILITY: [0.67, 23.47],
+  CRISIUM: [17.0, 59.1], FECUNDITATIS: [-7.8, 51.3], VONKARMAN: [-45.5, 177.6], MOSCOVIENSE: [27.3, 147.9], KOROLEV: [-4.0, -157.4], AITKEN: [-53.0, -169.0],
+  COPERNICUS: [9.6, -20.1], NUBIUM: [-21.0, -16.0], SERENITATIS: [32.6, 19.4], VAPORUM: [13.3, 3.6], CHANGE: [-60, 120]
+};
+// ---------------- countries & teams ----------------
+const COUNTRIES = { us: 'UNITED STATES', gb: 'BRITAIN', fr: 'FRANCE', it: 'ITALY', il: 'ISRAEL', kr: 'SOUTH KOREA', au: 'AUSTRALIA', nz: 'NEW ZEALAND', cn: 'CHINA', ru: 'RUSSIA', kp: 'NORTH KOREA', ir: 'IRAN', in: 'INDIA', br: 'BRAZIL' };
+const TEAMCOL = ['#3d8bff', '#ff3b3b', '#ff9a1f', '#2ecc71', '#ffffff', '#5ce1e6'];
+const T_INDIA_JOIN = Wd('india', 'joins');
+const teamOf = (c, t) => ({ us: 0, gb: 0, fr: 0, it: 0, il: 0, kr: 0, au: 0, nz: 0, cn: 1, ru: 1, kp: 1, ir: 1, br: 3 }[c] ?? (t >= T_INDIA_JOIN ? 0 : 2));
+const flags = {};
+await Promise.all(Object.keys(COUNTRIES).map(c => new Promise(r => { const im = new Image(); im.onload = () => { const cv = document.createElement('canvas'); cv.width = 160; cv.height = 120; cv.getContext('2d').drawImage(im, 0, 0, 160, 120); flags[c] = cv; r(); }; im.src = `assets/flag_${c}.svg`; })));
+const ff = new FontFace('Mont', 'url(assets/montserrat-latin-900-normal.woff2)', { weight: '900' }); await ff.load(); document.fonts.add(ff);
+const ff8 = new FontFace('Mont', 'url(assets/montserrat-latin-800-normal.woff2)', { weight: '800' }); await ff8.load(); document.fonts.add(ff8);
+
+// ---------------- renderer ----------------
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1); renderer.setSize(W, H); renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+const texL = new THREE.TextureLoader();
+const loadTex = (u, srgb = true) => new Promise(r => texL.load(u, t => { if (srgb) t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; r(t); }));
+const [moonT, normT, starT, earthT] = await Promise.all([loadTex('assets/moon_8k.jpg'), loadTex('assets/moon_normal.png', false), loadTex('assets/8k_stars_milky_way.jpg'), loadTex('assets/day2.jpg')]);
+
+// ===== MAP SCENE =====
+const map = new THREE.Scene(); map.background = new THREE.Color(0);
+const mcam = new THREE.PerspectiveCamera(30, W / H, 0.01, 2000);
+const NCP = 48;
+const cpPos = Array.from({ length: NCP }, () => new THREE.Vector4(0, 0, 0, 0)); const cpTeam = new Float32Array(NCP).fill(-1);
+const teamColU = TEAMCOL.map(c => new THREE.Color(c));
+const moonMat = new THREE.ShaderMaterial({
+  uniforms: { map: { value: moonT }, nmap: { value: normT }, L: { value: new THREE.Vector3(-0.5, 0.6, 0.8).normalize() }, cp: { value: cpPos }, cpT: { value: cpTeam }, tcol: { value: teamColU }, fillK: { value: 1 }, storm: { value: 0 }, time: { value: 0 } },
+  vertexShader: `varying vec3 vP; varying vec3 vW; void main(){ vP = normalize(position); vW = (modelMatrix*vec4(position,1.0)).xyz; gl_Position = projectionMatrix*viewMatrix*vec4(vW,1.0);} `,
+  fragmentShader: `
+  uniform sampler2D map, nmap; uniform vec3 L; uniform vec4 cp[${NCP}]; uniform float cpT[${NCP}]; uniform vec3 tcol[6]; uniform float fillK, storm, time;
+  varying vec3 vP; varying vec3 vW; const float PI = 3.14159265;
+  float h3(vec3 p){ p = fract(p*0.3183099+0.1); p *= 17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
+  float n3(vec3 x){ vec3 i=floor(x), f=fract(x); f=f*f*(3.0-2.0*f); return mix(mix(mix(h3(i),h3(i+vec3(1,0,0)),f.x),mix(h3(i+vec3(0,1,0)),h3(i+vec3(1,1,0)),f.x),f.y),mix(mix(h3(i+vec3(0,0,1)),h3(i+vec3(1,0,1)),f.x),mix(h3(i+vec3(0,1,1)),h3(i+vec3(1,1,1)),f.x),f.y),f.z); }
+  void main(){
+    vec3 n = normalize(vP); float lon = atan(-n.z, n.x); float lat = asin(clamp(n.y,-1.0,1.0));
+    vec2 uv = vec2(lon/(2.0*PI)+0.5, lat/PI+0.5);
+    vec2 uvB = vec2(fract(uv.x+0.5), uv.y); vec2 dx = dFdx(uv), dy = dFdy(uv), dxB = dFdx(uvB), dyB = dFdy(uvB);
+    if (abs(dxB.x)+abs(dyB.x) < abs(dx.x)+abs(dy.x)) { dx = dxB; dy = dyB; }
+    vec3 base = textureGrad(map, uv, dx, dy).rgb;
+    vec3 tn = textureGrad(nmap, uv, dx, dy).rgb*2.0-1.0;
+    vec3 east = normalize(vec3(-sin(lon), 0.0, -cos(lon))); vec3 north = normalize(cross(n, east));
+    vec3 nn = normalize(east*tn.x + north*tn.y + n*tn.z*1.0);
+    vec3 V = normalize(cameraPosition - vW);
+    float dif = max(dot(nn, L), 0.0); float amb = 0.32;
+    vec3 col = base * (amb + 1.05*dif) * 1.05;
+    // ownership
+    float wob = (n3(n*7.0)-0.5)*0.22 + (n3(n*19.0)-0.5)*0.10;
+    float best = 9.0, sec = 9.0; float bt = -1.0, st2 = -1.0;
+    for (int i = 0; i < ${NCP}; i++) { if (cpT[i] < -0.5) continue; float d = acos(clamp(dot(n, cp[i].xyz), -1.0, 1.0)) / cp[i].w * (1.0 + wob);
+      if (d < best) { if (cpT[i] != bt) { sec = best; st2 = bt; } best = d; bt = cpT[i]; } else if (d < sec && cpT[i] != bt) { sec = d; st2 = cpT[i]; } }
+    if (best < 1.0 && bt > -0.5) {
+      int ti = int(bt + 0.5); vec3 tc = tcol[0]; for (int k=0;k<6;k++) if (k==ti) tc = tcol[k];
+      float a = 0.30 * fillK;
+      if (ti == 5) { float stripe = step(0.5, fract((lon*30.0 + lat*30.0))); a *= 0.6 + 0.6*stripe; }
+      col = mix(col, tc*1.1, a);
+      // outer border of territory
+      float e = 1.0 - best; float wE = fwidth(best)*1.6; col = mix(col, tc*1.4, smoothstep(wE, 0.0, e) * 0.9 * fillK);
+      // front line between different teams
+      if (sec < 1.0 && st2 != bt) { float g = sec - best; float w = fwidth(g)*2.2; float line = smoothstep(w, 0.0, g);
+        float glow = smoothstep(w*5.0, 0.0, g);
+        bool war = (bt < 1.5 && st2 < 1.5) && (bt != st2) && ti != 5 && int(st2+0.5) != 5;
+        vec3 lc = war ? vec3(1.0, 0.92, 0.75) : vec3(0.9);
+        col = mix(col, lc * 1.6, line * fillK); col += (war ? vec3(1.0,0.35,0.15) : vec3(0.2)) * glow * 0.35 * fillK; }
+    }
+    // solar storm wash
+    col = mix(col, col*vec3(1.4,1.0,0.5) + vec3(0.25,0.12,0.0), storm*0.8);
+    float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0); col += vec3(0.25,0.28,0.35)*rim*0.25;
+    gl_FragColor = vec4(col, 1.0);
+  }` });
+const moon = new THREE.Mesh(new THREE.SphereGeometry(1, 256, 128), moonMat); map.add(moon);
+const stars = new THREE.Mesh(new THREE.SphereGeometry(900, 64, 32), new THREE.MeshBasicMaterial({ map: starT, side: THREE.BackSide, color: new THREE.Color(0.9, 0.9, 1.0) })); map.add(stars);
+// Earth for the "back on Earth" beat (not to scale)
+const earthMat = new THREE.ShaderMaterial({ uniforms: { map: { value: earthT }, L: { value: new THREE.Vector3(-0.6, 0.3, 0.75).normalize() } },
+  vertexShader: `varying vec3 vP; varying vec3 vW; void main(){ vP=normalize(position); vW=(modelMatrix*vec4(position,1.0)).xyz; gl_Position=projectionMatrix*viewMatrix*vec4(vW,1.0);} `,
+  fragmentShader: `uniform sampler2D map; uniform vec3 L; varying vec3 vP; varying vec3 vW; void main(){ vec3 n=normalize(vP); float lon=atan(-n.z,n.x); float lat=asin(n.y); vec3 c=texture2D(map, vec2(lon/6.2831853+0.5, lat/3.14159265+0.5)).rgb; vec3 V=normalize(cameraPosition-vW); float d=max(dot(n,L),0.0); c=c*(0.05+1.5*d); c+=vec3(0.3,0.55,1.0)*pow(1.0-max(dot(n,V),0.0),3.0)*0.8; gl_FragColor=vec4(c,1.0);} ` });
+const earth = new THREE.Mesh(new THREE.SphereGeometry(3.67, 96, 48), earthMat); earth.position.set(-14, 9, -46); earth.visible = false; map.add(earth);
+
+// ===== GROUND (battle cut-in) SCENE =====
+const ground = new THREE.Scene(); ground.background = new THREE.Color(0);
+const gcam = new THREE.PerspectiveCamera(42, W / H, 0.1, 4000);
+const gStars = new THREE.Mesh(new THREE.SphereGeometry(1500, 64, 32), new THREE.MeshBasicMaterial({ map: starT, side: THREE.BackSide, color: new THREE.Color(0.7, 0.7, 0.8) })); ground.add(gStars);
+const regolith = (() => { const c = document.createElement('canvas'); c.width = c.height = 1024; const g = c.getContext('2d'); const id = g.createImageData(1024, 1024); const r = rng(5);
+  for (let i = 0; i < 1024 * 1024; i++) { const v = 118 + (r() - 0.5) * 50; id.data[i * 4] = v; id.data[i * 4 + 1] = v * 0.98; id.data[i * 4 + 2] = v * 0.95; id.data[i * 4 + 3] = 255; } g.putImageData(id, 0, 0);
+  for (let k = 0; k < 500; k++) { const x = r() * 1024, y = r() * 1024, rad = 2 + r() * 14; g.fillStyle = `rgba(${r() < 0.5 ? '60,60,60' : '200,200,200'},${0.15 + r() * 0.2})`; g.beginPath(); g.arc(x, y, rad, 0, 7); g.fill(); }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(40, 40); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t; })();
+const terr = new THREE.PlaneGeometry(1200, 1200, 300, 300); terr.rotateX(-Math.PI / 2);
+{ const p = terr.attributes.position; const cr = rng(11); const craters = Array.from({ length: 70 }, () => [(cr() - 0.5) * 1100, (cr() - 0.5) * 1100, 4 + Math.pow(cr(), 2) * 45]);
+  for (let i = 0; i < p.count; i++) { const x = p.getX(i), z = p.getZ(i); let h = 0;
+    h += Math.sin(x * 0.012 + 1.3) * Math.cos(z * 0.010) * 2.4 + Math.sin(x * 0.031 + z * 0.027) * 0.8 + (hash(Math.floor(x / 3), Math.floor(z / 3)) - 0.5) * 0.12;
+    for (const [cx, cz, cr2] of craters) { const d = Math.hypot(x - cx, z - cz) / cr2; if (d < 1.4) h += d < 1 ? -cr2 * 0.18 * (1 - d * d) : cr2 * 0.06 * Math.max(0, 1 - Math.abs(d - 1.1) * 3.3); }
+    if (Math.hypot(x, z) > 380) h += (Math.hypot(x, z) - 380) * 0.06;
+    p.setY(i, h); }
+  terr.computeVertexNormals(); }
+const terrain = new THREE.Mesh(terr, new THREE.MeshStandardMaterial({ map: regolith, roughness: 1, metalness: 0, color: 0xb8b4ae })); terrain.receiveShadow = true; ground.add(terrain);
+const heightAt = (x, z) => { let h = Math.sin(x * 0.012 + 1.3) * Math.cos(z * 0.010) * 2.4 + Math.sin(x * 0.031 + z * 0.027) * 0.8; return h; };
+const gsun = new THREE.DirectionalLight(0xfff6ea, 4.0); gsun.castShadow = true; gsun.shadow.mapSize.set(2048, 2048); const gsc = gsun.shadow.camera; gsc.left = -120; gsc.right = 120; gsc.top = 120; gsc.bottom = -120; gsc.far = 900; gsun.shadow.bias = -0.0006; ground.add(gsun); ground.add(gsun.target);
+const gamb = new THREE.HemisphereLight(0x8899aa, 0x333333, 0.6); ground.add(gamb);
+const gEarth = new THREE.Mesh(new THREE.SphereGeometry(40, 64, 32), earthMat); gEarth.position.set(-500, 140, -1200); ground.add(gEarth);
+function flagMat(c) { const t = new THREE.CanvasTexture(flags[c]); t.colorSpace = THREE.SRGBColorSpace; return new THREE.MeshStandardMaterial({ map: t, roughness: 0.7 }); }
+const camoMat = (team) => new THREE.MeshStandardMaterial({ color: team ? 0x7a6a5e : 0x8a9096, roughness: 0.75, metalness: 0.25 });
+function makeTank(c, kind = 'tank') {
+  const team = teamOf(c, 999); const g = new THREE.Group(); const m = camoMat(team); const dark = new THREE.MeshStandardMaterial({ color: 0x1f2124, roughness: 0.8 });
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.0, 6.4), m); hull.position.y = 1.3; g.add(hull);
+  const slope = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.6, 1.6), m); slope.position.set(0, 1.55, 3.4); slope.rotation.x = -0.5; g.add(slope);
+  for (const sx of [-1, 1]) for (const z of [-2.3, 0, 2.3]) { const w = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.75, 0.55, 20), dark); w.rotation.z = Math.PI / 2; w.position.set(sx * 1.75, 0.75, z); g.add(w); }
+  const turret = new THREE.Group(); turret.position.set(0, 2.05, -0.3); g.add(turret);
+  const tb = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.75, 2.6), m); turret.add(tb);
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.16, kind === 'arty' ? 7.5 : 5.0, 12), dark); barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0.1, kind === 'arty' ? 4.6 : 3.6); const bp = new THREE.Group(); bp.add(barrel); turret.add(bp);
+  if (kind === 'arty') bp.rotation.x = -0.55;
+  const panel = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.05, 1.6), new THREE.MeshStandardMaterial({ color: 0x14203a, metalness: 0.5, roughness: 0.3 })); panel.position.set(0, 1.85, -2.6); g.add(panel);
+  const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 2.2, 6), dark); ant.position.set(-0.8, 3.2, -1.2); g.add(ant);
+  const fl = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.9), flagMat(c)); fl.position.set(1.62, 1.35, -0.6); fl.rotation.y = Math.PI / 2; g.add(fl);
+  const fl2 = fl.clone(); fl2.position.x = -1.62; fl2.rotation.y = -Math.PI / 2; g.add(fl2);
+  const stripe = new THREE.Mesh(new THREE.BoxGeometry(3.25, 0.18, 6.45), new THREE.MeshStandardMaterial({ color: TEAMCOL[team], emissive: TEAMCOL[team], emissiveIntensity: 0.4 })); stripe.position.y = 1.85; g.add(stripe);
+  const lamp = new THREE.SpotLight(0xffffff, 0, 60, 0.35, 0.5, 1.2); lamp.position.set(0, 1.6, 3.3); lamp.target.position.set(0, 0, 25); g.add(lamp); g.add(lamp.target);
+  g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  g.userData = { turret, bp, lamp, team };
+  return g;
+}
+function makeLander(c) {
+  const g = new THREE.Group(); const m = new THREE.MeshStandardMaterial({ color: 0xb8a070, metalness: 0.6, roughness: 0.4 }); const d = new THREE.MeshStandardMaterial({ color: 0x333333 });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.8, 3.2, 8), m); body.position.y = 3.6; g.add(body);
+  const top = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 2.4, 1.4, 8), m); top.position.y = 5.9; g.add(top);
+  for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2 + 0.4; const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 4.2, 8), d); leg.position.set(Math.cos(a) * 3.0, 1.6, Math.sin(a) * 3.0); leg.rotation.z = Math.cos(a) * 0.5; leg.rotation.x = -Math.sin(a) * 0.5; g.add(leg); }
+  const fl = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.35), flagMat(c)); fl.position.set(0, 3.8, 2.75); g.add(fl);
+  g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } }); return g;
+}
+const flashTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 128; const g = c.getContext('2d'); const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.2, 'rgba(255,230,180,0.9)'); gr.addColorStop(1, 'rgba(255,140,40,0)'); g.fillStyle = gr; g.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(c); })();
+const dustTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d'); const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, 'rgba(200,196,190,0.9)'); gr.addColorStop(1, 'rgba(200,196,190,0)'); g.fillStyle = gr; g.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); })();
+const flashes = Array.from({ length: 24 }, () => { const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: flashTex, color: new THREE.Color(3, 2.6, 2.2), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true })); s.visible = false; ground.add(s); return s; });
+// ballistic dust (no air: clean parabolic arcs, no billowing)
+const DUSTN = 6000; const dustPos = new Float32Array(DUSTN * 3); const dustGeo = new THREE.BufferGeometry(); dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustPts = new THREE.Points(dustGeo, new THREE.PointsMaterial({ map: dustTex, size: 0.38, transparent: true, depthWrite: false, color: 0xd8d2c8, opacity: 0.9 })); dustPts.frustumCulled = false; ground.add(dustPts);
+const tracerGeo = new THREE.BufferGeometry(); const tracerPos = new Float32Array(60 * 3); tracerGeo.setAttribute('position', new THREE.BufferAttribute(tracerPos, 3));
+const tracers = new THREE.Points(tracerGeo, new THREE.PointsMaterial({ map: flashTex, size: 2.2, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, color: new THREE.Color(4, 3, 2) })); tracers.frustumCulled = false; ground.add(tracers);
+const G = 1.62;
+function impactDust(list, t, x, z, t0, n, seed, power = 1) {
+  if (t < t0) return; const a = t - t0; const r = rng(seed);
+  if (a > 4.5) return; for (let i = 0; i < n; i++) { const th = r() * Math.PI * 2, el = 0.6 + r() * 0.8, v = (1.2 + r() * 4.2) * power; if (r() > 1 - a / 4.5) continue;
+    const vx = Math.cos(th) * Math.cos(el) * v, vz = Math.sin(th) * Math.cos(el) * v, vy = Math.sin(el) * v;
+    let y = vy * a - 0.5 * G * a * a; if (y < 0) continue; list.push(x + vx * a, y + heightAt(x, z), z + vz * a); }
+}
+const vehicles = {}; const vlist = [];
+function addVeh(id, obj) { vehicles[id] = obj; ground.add(obj); vlist.push(obj); obj.visible = false; return obj; }
+addVeh('usRover', makeTank('us')); addVeh('cnRover', makeTank('cn'));
+['cn', 'cn', 'ru', 'ru'].forEach((c, i) => addVeh('pact' + i, makeTank(c)));
+['us', 'il', 'us'].forEach((c, i) => addVeh('arty' + i, makeTank(c, 'arty')));
+['kp', 'kp'].forEach((c, i) => addVeh('lander' + i, makeLander(c)));
+['au', 'kr', 'nz'].forEach((c, i) => addVeh('anz' + i, makeTank(c)));
+const iceField = new THREE.Mesh(new THREE.CircleGeometry(30, 48), new THREE.MeshStandardMaterial({ color: 0x9fd6ff, roughness: 0.25, metalness: 0.1, emissive: 0x1a3a55, transparent: true, opacity: 0.8 })); iceField.rotation.x = -Math.PI / 2; iceField.position.y = 0.3; ground.add(iceField);
+const ggComposer = null;
+
+// ---------------- post ----------------
+function mkComposer(scene, cam) { const c = new EffectComposer(renderer, new THREE.WebGLRenderTarget(W, H, { type: THREE.HalfFloatType, samples: 4 })); c.addPass(new RenderPass(scene, cam)); const b = new UnrealBloomPass(new THREE.Vector2(W, H), 0.45, 0.5, 0.86); c.addPass(b); c.addPass(new OutputPass()); c.bloom = b; return c; }
+const mapComposer = mkComposer(map, mcam), groundComposer = mkComposer(ground, gcam);
+
+// ===================== SCENARIO DATA =====================
+const T = id => ST[id];
+// control points: [id, team, place/latlon, radiusDeg, tOn, tOff, extra keys]
+// radius can be keyed: rk = [[t, r], ...]; team can change: tk = [[t, team], ...]; position keyed pk = [[t, lat, lon], ...]
+const CPS = [];
+const cp = (o) => CPS.push(o);
+const tTeams = Wd('teams', 'artemis');
+const nm = (w, n = 0) => Wd('teams', w, n);
+// Coalition bases (appear as named)
+cp({ team: 0, at: P.TRANQUILITY, r: 28, on: Wd('teams', 'america') });
+cp({ team: 0, at: P.MALAPERT, r: 4.5, on: Wd('teams', 'america') });
+cp({ team: 0, at: P.SHACKLETON, r: 3.2, on: Wd('teams', 'america') });
+cp({ team: 0, at: P.CABEUS, r: 4.0, on: Wd('teams', 'britain') });
+cp({ team: 0, at: P.COPERNICUS, r: 22, on: Wd('teams', 'france') });
+cp({ team: 0, at: P.VAPORUM.map((v, i) => i ? v - 12 : v + 8), r: 16, on: Wd('teams', 'italy') });
+cp({ team: 0, at: P.SERENITATIS, r: 18, on: Wd('teams', 'israel') });
+cp({ team: 0, at: P.NUBIUM, r: 18, on: Wd('teams', 'south') });
+cp({ team: 0, at: P.FECUNDITATIS, r: 16, on: Wd('teams', 'australia') });
+cp({ team: 0, at: [-14, 64], r: 12, on: Wd('teams', 'zealand') });
+// Pact
+cp({ team: 1, at: P.VONKARMAN, r: 30, on: Wd('pact', 'china') });
+cp({ team: 1, at: P.AMUNDSEN, r: 4.2, on: Wd('pact', 'china'), rk: [[Wd('strike', 'seize') - 1, 4.2], [Wd('strike', 'seize') + 2, 6.0], [Wd('counter', 'retake'), 5.4]] });
+cp({ team: 1, at: P.MOSCOVIENSE, r: 24, on: Wd('pact', 'russia'), rk: [[Wd('raid', 'apart'), 24], [Wd('raid', 'apart') + 2, 18]] });
+cp({ team: 1, at: P.KOROLEV, r: 24, on: Wd('pact', 'russia') });
+cp({ team: 1, at: [-35, 160], r: 16, on: Wd('pact', 'north') });
+cp({ team: 1, at: P.AITKEN, r: 22, on: Wd('pact', 'iran') });
+// Neutrals
+cp({ team: 2, at: P.SHIVSHAKTI, r: 9, on: Wd('pact', 'india'), tk: [[T_INDIA_JOIN, 0]] });
+cp({ team: 3, at: P.VAPORUM, r: 6, on: Wd('pact', 'brazil') });
+// Pact seizures at the pole (day 3) and Coalition retake (day 40)
+cp({ team: 1, at: P.SHOEMAKER, r: 2.6, on: Wd('strike', 'seize') + 0.2, rk: [[Wd('strike', 'seize') + 0.2, 0.2], [Wd('strike', 'seize') + 1.2, 2.6]] });
+cp({ team: 1, at: P.HAWORTH, r: 2.4, on: Wd('strike', 'haworth') + 0.1, off: Wd('counter', 'retake') + 0.6, rk: [[Wd('strike', 'haworth'), 0.2], [Wd('strike', 'haworth') + 1.0, 2.4]] });
+cp({ team: 1, at: P.FAUSTINI, r: 2.6, on: Wd('strike', 'pour') });
+cp({ team: 1, at: P.NOBILE, r: 2.6, on: Wd('strike', 'pour') + 0.4 });
+cp({ team: 0, at: P.HAWORTH, r: 2.6, on: Wd('counter', 'retake') + 0.3, rk: [[Wd('counter', 'retake') + 0.3, 0.3], [Wd('counter', 'retake') + 1.3, 2.6]] });
+// Coalition fortress ring at Shackleton
+cp({ team: 0, at: [-88.0, -20], r: 2.0, on: Wd('digin', 'fortresses') - 0.8 });
+cp({ team: 0, at: [-86.5, 20], r: 2.0, on: Wd('digin', 'fortresses') - 0.5 });
+// de Gerlache: last push fails
+cp({ team: 1, at: [-87.0, -120], r: 2.4, on: Wd('lastpush', 'gerlache') - 0.5, off: Wd('lastpush', 'collapses') + 0.5 });
+cp({ team: 0, at: P.DEGERLACHE, r: 2.2, on: Wd('digin', 'fortresses') });
+// North Korean landing at Crisium
+cp({ team: 1, at: P.CRISIUM, r: 7.5, on: Wd('crisium', 'touch'), off: Wd('crisium2', 'oxygen') + 0.4, rk: [[Wd('crisium', 'touch'), 0.5], [Wd('crisium', 'touch') + 1.6, 7.5], [Wd('crisium2', 'lasts'), 7.5], [Wd('crisium2', 'oxygen'), 2.0]] });
+cp({ team: 0, at: [10, 56], r: 6, on: Wd('crisium2', 'oxygen') });
+// shared zones after the treaty (team 5) replace the poles
+const tShared = Wd('treaty', 'shared');
+cp({ team: 5, at: [-90, 0], r: 9.5, on: tShared, rk: [[tShared, 0.5], [tShared + 1.5, 9.5]] });
+cp({ team: 5, at: [90, 0], r: 9.5, on: tShared + 0.4, rk: [[tShared + 0.4, 0.5], [tShared + 1.9, 9.5]] });
+const keyed = (k, t, d) => { if (!k) return d; let v = k[0][1]; for (const [tt, vv] of k) if (t >= tt) v = vv; for (let i = 0; i < k.length - 1; i++) if (t >= k[i][0] && t < k[i + 1][0]) v = lerp(k[i][1], k[i + 1][1], ease((t - k[i][0]) / (k[i + 1][0] - k[i][0]))); return v; };
+const keyedTeam = (k, t, d) => { if (!k) return d; let v = d; for (const [tt, vv] of k) if (t >= tt) v = vv; return v; };
+function updateCPs(t) {
+  for (let i = 0; i < NCP; i++) cpTeam[i] = -1;
+  let n = 0;
+  for (const c of CPS) { if (t < c.on || (c.off && t > c.off)) continue; if (n >= NCP) break;
+    const grow = ss(c.on, c.on + 0.6, t); const r = keyed(c.rk, t, c.r) * (c.rk ? 1 : grow);
+    // after the treaty, war territories shrink back from the poles
+    let rr = r; if (t > tShared && c.team !== 5 && Math.abs(c.at[0]) > 80) rr *= 1 - 0.85 * ss(tShared, tShared + 1.5, t);
+    const p = geo(c.at[0], c.at[1]); cpPos[n].set(p.x, p.y, p.z, Math.max(0.001, rr * DEG)); cpTeam[n] = keyedTeam(c.tk, t, c.team); n++; }
+}
+
+// ---------------- units (flag counters) ----------------
+// type: arm (armour), inf, art, eng, cmd (commando), sup (supply), lnd (lander), rov (rover)
+const UNITS = [];
+const unit = (c, type, label, keys, tOff = 999) => UNITS.push({ c, type, label, keys, tOff });
+const tA = Wd('teams', 'america');
+unit('us', 'inf', '1st LUNAR BDE', [[tA, ...P.TRANQUILITY]]);
+unit('us', 'eng', 'ARTEMIS BASE', [[tA, -85.2, 8]]);
+unit('gb', 'eng', 'ROYAL ENG.', [[Wd('teams', 'britain'), ...P.CABEUS], [Wd('digin', 'british'), -85.0, -32]]);
+unit('fr', 'inf', 'LÉGION LUNE', [[Wd('teams', 'france'), ...P.COPERNICUS], [Wd('digin', 'french'), -83.6, 22]]);
+unit('it', 'inf', 'BRIGATA LUNA', [[Wd('teams', 'italy'), 18, -8]]);
+unit('il', 'arm', '7th ARMORED', [[Wd('teams', 'israel'), ...P.SERENITATIS], [Wd('counter', 'push'), 22, 21], [Wd('counter', 'retake'), -83.0, -12]]);
+unit('kr', 'arm', 'K-2 LUNAR', [[Wd('teams', 'south'), ...P.NUBIUM], [Wd('crisium', 'race'), -21, -16], [Wd('crisium', 'stop'), 9, 46]]);
+unit('au', 'arm', '1st ARMD REGT', [[Wd('teams', 'australia'), ...P.FECUNDITATIS], [Wd('crisium', 'race'), -7.8, 51.3], [Wd('crisium', 'stop'), 12, 62]]);
+unit('nz', 'inf', 'KIWI COY', [[Wd('teams', 'zealand'), -14, 64], [Wd('crisium', 'race'), -14, 64], [Wd('crisium', 'stop'), 20, 66]]);
+unit('cn', 'arm', '1st LUNAR ARMD', [[Wd('pact', 'china'), ...P.VONKARMAN], [Wd('strike', 'pour'), -82, 95], [Wd('strike', 'seize'), -86.0, 58]]);
+unit('cn', 'art', 'RAILGUN BTY', [[Wd('pact', 'china'), -82.5, 95]]);
+unit('ru', 'arm', '2nd GUARDS ARMD', [[Wd('pact', 'russia'), ...P.KOROLEV], [Wd('strike', 'pour'), -78, 150], [Wd('strike', 'haworth'), -86.8, -40], [Wd('counter', 'retake'), -84.5, -75], [Wd('lastpush', 'gerlache'), -87.2, -118]]);
+unit('ru', 'art', 'MASS DRIVER', [[Wd('pact', 'russia'), ...P.MOSCOVIENSE]], Wd('raid', 'apart'));
+unit('kp', 'inf', 'LUNAR CORPS', [[Wd('pact', 'north'), -35, 160]]);
+unit('kp', 'lnd', 'LANDING GRP', [[Wd('crisium', 'touch'), ...P.CRISIUM]], Wd('crisium2', 'oxygen') + 0.2);
+unit('ir', 'sup', 'SUPPLY CMD', [[Wd('pact', 'iran'), ...P.AITKEN]]);
+unit('in', 'inf', 'CHANDRA BDE', [[Wd('pact', 'india'), ...P.SHIVSHAKTI], [Wd('stalemate', 'freezes'), -80.5, 36]]);
+unit('br', 'inf', 'PEACE OBS.', [[Wd('pact', 'brazil'), ...P.VAPORUM]]);
+unit('gb', 'cmd', 'SAS LUNAR', [[Wd('raid', 'commandos'), 10, 95], [Wd('raid', 'darkness'), 24, 128], [Wd('raid', 'apart'), 26, 145]], Wd('raid', 'apart') + 3);
+unit('il', 'cmd', 'SAYERET', [[Wd('raid', 'commandos'), 6, 98], [Wd('raid', 'darkness'), 20, 130], [Wd('raid', 'apart'), 24, 150]], Wd('raid', 'apart') + 3);
+unit('us', 'arm', '3rd ARMD BDE', [[Wd('counter', 'american'), ...P.TRANQUILITY], [Wd('counter', 'push'), -20, 15], [Wd('counter', 'retake'), -86.2, 12]]);
+unit('ir', 'sup', 'CONVOY', [[Wd('iran', 'sends'), ...P.AITKEN], [Wd('iran', 'days'), -70, 140], [Wd('iran', 'dry'), -80, 105]]);
+function unitPos(u, t) {
+  const k = u.keys; if (t < k[0][0]) return null;
+  let i = 0; while (i < k.length - 1 && t >= k[i + 1][0]) i++;
+  if (i === k.length - 1) return [k[i][1], k[i][2], k[0][0]];
+  const a = k[i], b = k[i + 1]; const travel = Math.min(2.2, (b[0] - a[0]));
+  const u2 = ease((t - (b[0] - travel)) / travel); return [...slerpLL([a[1], a[2]], [b[1], b[2]], clamp(u2)), k[0][0]];
+}
+// ---------------- arrows ----------------
+const ARROWS = [];
+const arrow = (team, pts, t0, t1, fail = 0, width = 34, dashed = false) => ARROWS.push({ team, pts, t0, t1, fail, width, dashed });
+arrow(1, [[-80, 100], [-84.5, 70], [-87.2, 48]], Wd('strike', 'pour'), Wd('digin', 'british'));
+arrow(1, [[-80, -110], [-85, -60], [-87.0, -12]], Wd('strike', 'pour') + 0.3, Wd('digin', 'british'));
+arrow(0, [P.FECUNDITATIS, [3, 56], [12, 60]], Wd('crisium', 'race'), Wd('crisium2', 'oxygen'));
+arrow(0, [P.NUBIUM, [-5, 25], [8, 48]], Wd('crisium', 'race') + 0.2, Wd('crisium2', 'oxygen'));
+arrow(0, [[0, 115], [18, 130], [24, 146]], Wd('raid', 'commandos'), Wd('raid', 'apart') + 1.5, 0, 22, true);
+arrow(0, [P.TRANQUILITY, [-30, 12], [-70, 0], [-85.0, -4]], Wd('counter', 'push'), Wd('iran', 'sends'));
+arrow(1, [P.AITKEN, [-70, 150], [-80, 105]], Wd('iran', 'sends'), Wd('stalemate', 'day'), 0, 18, true);
+arrow(1, [[-80, -150], [-86, -130], [-88.2, -95]], Wd('lastpush', 'throws'), Wd('totals', 'almost'), Wd('lastpush', 'collapses'));
+// ---------------- battles (flashes) ----------------
+const BATTLES = [];
+const battle = (at, r, t0, t1, k = 1) => BATTLES.push({ at, r, t0, t1, k });
+battle(P.SHACKLETON, 1.5, 999, 999, 1.4);
+battle(P.SHOEMAKER, 2.0, Wd('strike', 'seize') - 0.5, Wd('physics', 'no') + 0.3);
+battle(P.HAWORTH, 2.0, Wd('strike', 'haworth') - 0.6, Wd('digin', 'coalition') + 1.0);
+battle([-87.5, -15], 2.5, Wd('digin', 'digs'), Wd('earth', 'back'), 0.6);
+battle(P.SHIVSHAKTI, 1.8, Wd('india', 'artillery') - 0.2, Wd('india', 'joins') + 0.8, 1.4);
+battle(P.CRISIUM, 5.0, Wd('crisium', 'race') + 1.0, Wd('crisium2', 'oxygen') + 0.6, 1.2);
+battle(P.MOSCOVIENSE, 2.0, Wd('raid', 'blow') - 0.2, Wd('raid', 'apart') + 1.6, 2.0);
+battle(P.HAWORTH, 2.4, Wd('counter', 'push') + 1.0, Wd('counter', 'retake') + 1.2, 1.2);
+battle([-80, 105], 3.0, Wd('iran', 'convoy') - 0.2, Wd('iran', 'dry') + 0.5, 0.6);
+battle([-87.6, 0], 9.0, Wd('stalemate', 'front'), Wd('stalemate', 'win') + 0.4, 0.5);
+battle([-87.6, -112], 2.4, Wd('lastpush', 'throws'), Wd('lastpush', 'collapses') + 0.5, 1.6);
+
+// ---------------- camera keys: [t, lat, lon, dist] ----------------
+const CK = [
+  [0, -86, 0, 1.75], [ST.teams - 0.3, -70, 5, 2.0], [ST.teams + 0.6, 5, 20, 4.1], [ST.pact - 0.2, 5, 20, 4.1], [ST.pact + 1.0, -15, 150, 4.1], [Wd('pact', 'india') - 0.4, -15, 150, 4.1], [Wd('pact', 'india') + 0.3, -30, 50, 4.1],
+  [ST.ice, -30, 40, 4.0], [ST.ice + 1.6, -88, 0, 1.75], [ST.incident, -88, 0, 1.75], [ST.incident + 1.5, -89, 10, 1.3],
+  [ST.strike, -82, 40, 1.9], [ST.strike + 4, -84, 20, 1.75], [ST.digin, -86, 0, 1.65], [ST.earth, -60, 0, 3.0],
+  [ST.india, -55, 25, 2.6], [ST.crisium, 8, 50, 2.7], [ST.crisium2 + 4, 12, 55, 2.4], [ST.massdriver, 20, 130, 2.8], [ST.raid + 2, 20, 130, 2.6],
+  [ST.counter, -20, 10, 3.3], [ST.counter + 5, -75, 0, 2.1], [ST.iran, -65, 140, 2.8], [ST.stalemate, -86, 0, 1.7], [ST.lastpush, -84, -80, 1.8], [ST.totals, -70, 0, 3.4],
+  [ST.storm, 0, 30, 4.4], [ST.talks, 0, 30, 4.4], [ST.treaty, -80, 10, 2.3], [Wd('treaty', 'banned'), -80, 10, 2.3], [ST.end, -30, 20, 4.2], [ST.end, 5, 20, 4.2], [END, 5, 60, 4.6]
+];
+function camKey(t) {
+  let i = 0; while (i < CK.length - 2 && t >= CK[i + 1][0]) i++;
+  const a = CK[i], b = CK[i + 1]; const u = ease((t - a[0]) / Math.max(0.01, b[0] - a[0]));
+  const ll = slerpLL([a[1], a[2]], [b[1], b[2]], u); const d = Math.exp(lerp(Math.log(a[3]), Math.log(b[3]), u));
+  return { lat: ll[0], lon: ll[1], d: 1 + (d - 1) * 2.4 };
+}
+// ---------------- news ----------------
+const NEWS = [];
+const news = (t, cat, text) => NEWS.push({ t, cat, text });
+news(0.4, 'WAR', 'SHOTS FIRED NEAR LUNAR SOUTH POLE');
+news(Wd('teams', 'artemis'), 'MISC', 'MOON POPULATION PASSES 22,000');
+news(Wd('pact', 'against'), 'EARTH', 'UN SECURITY COUNCIL CALLS EMERGENCY SESSION');
+news(Wd('ice', 'water'), 'MISC', 'ICE NOW WORTH MORE THAN GOLD, PER KILOGRAM');
+news(Wd('incident', 'day'), 'WAR', 'STANDOFF AT SHACKLETON ICE FIELD');
+news(Wd('incident', 'nobody'), 'MISC', 'LUNAR TOURISM FLIGHTS SUSPENDED');
+news(Wd('strike', 'pact'), 'WAR', 'PACT ARMOR CROSSES INTO SOUTH POLE');
+news(Wd('strike', 'seize'), 'WAR', 'SHOEMAKER & HAWORTH CRATERS FALL');
+news(Wd('physics', 'sound'), 'MISC', 'WAR CORRESPONDENTS: "IT IS COMPLETELY SILENT"');
+news(Wd('digin', 'fortresses'), 'WAR', 'COALITION FORTIFIES SHACKLETON RIM');
+news(Wd('earth', 'satellites'), 'EARTH', 'GPS OUTAGES ACROSS 3 CONTINENTS');
+news(Wd('earth', 'markets'), 'EARTH', 'GLOBAL MARKETS PLUNGE 18%');
+news(Wd('earth', 'warships'), 'EARTH', 'WAR FEARS ON EARTH: FLEETS ON ALERT IN PACIFIC');
+news(Wd('india', 'pact'), 'WAR', "INDIA'S SHIV SHAKTI BASE SHELLED");
+news(Wd('india', 'joins'), 'WAR', 'INDIA DECLARES FOR THE COALITION');
+news(Wd('crisium', 'surprise'), 'WAR', 'UNIDENTIFIED LANDERS OVER MARE CRISIUM');
+news(Wd('crisium', 'australia'), 'EARTH', 'SYDNEY, SEOUL PROTESTERS DEMAND CEASEFIRE');
+news(Wd('crisium2', 'lasts'), 'WAR', 'BATTLE OF CRISIUM: DAY 6');
+news(Wd('crisium2', 'oxygen'), 'WAR', 'CRISIUM LANDING GROUP SURRENDERS');
+news(Wd('massdriver', 'mass'), 'WAR', 'MASS DRIVER FIRES FROM FAR SIDE');
+news(Wd('massdriver', 'satellite'), 'EARTH', 'ORBIT DEBRIS ALERT: ISS-2 CREW SHELTERS');
+news(Wd('raid', 'commandos'), 'MISC', 'MARS COLONY DECLARES ITSELF NEUTRAL');
+news(Wd('raid', 'apart'), 'WAR', 'MASS DRIVER DESTROYED IN NIGHT RAID');
+news(Wd('counter', 'counterattacks'), 'WAR', 'COALITION COUNTEROFFENSIVE BEGINS');
+news(Wd('counter', 'retake'), 'WAR', 'HAWORTH CRATER RETAKEN');
+news(Wd('iran', 'iran'), 'WAR', 'PACT SUPPLY CONVOYS INTERCEPTED');
+news(Wd('iran', 'dry'), 'EARTH', 'OIL TANKERS HALTED, FUEL RATIONING IN EUROPE');
+news(Wd('stalemate', 'freezes'), 'WAR', 'FRONT LINE FROZEN AT 87°S');
+news(Wd('stalemate', 'neither', 1), 'PEACE', 'VATICAN, GENEVA OFFER MEDIATION');
+news(Wd('lastpush', 'collapses'), 'WAR', 'DE GERLACHE OFFENSIVE COLLAPSES');
+news(Wd('totals', 'casualties'), 'MISC', 'WORLD CUP 2050 QUALIFIERS POSTPONED');
+news(Wd('storm', 'solar'), 'MISC', 'X-CLASS SOLAR STORM HITS THE MOON');
+news(Wd('storm', 'phones'), 'PEACE', 'BOTH SIDES AGREE TO A CEASEFIRE');
+news(Wd('talks', 'rio'), 'PEACE', 'PEACE TALKS OPEN IN RIO DE JANEIRO');
+news(Wd('treaty', 'treaty'), 'PEACE', 'TREATY OF TRANQUILITY SIGNED');
+news(Wd('treaty', 'banned'), 'PEACE', 'MOON DECLARED WEAPON-FREE');
+news(Wd('end', 'ended'), 'MISC', 'LUNAR TOURISM REOPENS NEXT SPRING');
+// ---------------- day counter ----------------
+const DAYS = [[0, 0], [ST.incident, 1], [ST.strike, 3], [ST.india, 19], [ST.crisium, 24], [ST.crisium2, 26], [ST.massdriver, 31], [ST.raid, 35], [ST.counter, 40], [ST.iran, 52], [ST.stalemate, 62], [ST.lastpush, 70], [ST.totals, 73], [ST.storm, 76], [ST.talks, 83], [ST.treaty, 123], [END, 124]];
+const dayAt = t => { let d = 0; for (let i = 0; i < DAYS.length - 1; i++) if (t >= DAYS[i][0]) d = Math.round(lerp(DAYS[i][1], DAYS[i + 1][1], clamp((t - DAYS[i][0]) / Math.max(0.5, DAYS[i + 1][0] - DAYS[i][0]) * 1.6))); return d; };
+// ---------------- bars: forces & casualties (fictional) ----------------
+const FORCE_FINAL = { us: 5200, cn: 4800, ru: 2600, in: 1900, gb: 1100, fr: 900, il: 700, kr: 650, kp: 600, it: 500, au: 450, ir: 350, nz: 120, br: 80 };
+const CAS_FINAL = { cn: 1150, us: 980, ru: 720, kp: 520, in: 310, gb: 180, il: 120, fr: 110, kr: 95, au: 70, ir: 60, it: 40, nz: 15, br: 0 };
+function forcesAt(c, t) {
+  const f = FORCE_FINAL[c]; const start = ss(Wd('teams', 'artemis'), ST.ice, t) * 0.35; const mob = ss(ST.strike, ST.counter + 6, t) * 0.65;
+  if (c === 'kp') return f * (ss(ST.pact, ST.ice, t) * 0.15 + ss(Wd('crisium', 'touch'), Wd('crisium', 'touch') + 2, t) * 0.85);
+  if (c === 'in') return f * (ss(ST.pact, ST.ice, t) * 0.3 + ss(T_INDIA_JOIN, T_INDIA_JOIN + 6, t) * 0.7);
+  if (c === 'br') return f * ss(ST.pact, ST.ice, t) * (1 + 3 * ss(ST.treaty, ST.end, t));
+  const after = t > ST.treaty ? 1 - 0.45 * ss(ST.treaty, ST.end, t) : 1;
+  return f * (start + mob) * after;
+}
+function casAt(c, t) {
+  const f = CAS_FINAL[c]; if (!f) return 0;
+  const phases = { kp: [[Wd('crisium', 'race'), Wd('crisium2', 'oxygen'), 0.95], [ST.stalemate, ST.storm, 0.05]],
+    in: [[Wd('india', 'artillery'), ST.crisium, 0.4], [ST.stalemate, ST.storm, 0.6]],
+    au: [[Wd('crisium', 'race'), Wd('crisium2', 'oxygen'), 0.8], [ST.stalemate, ST.storm, 0.2]], kr: [[Wd('crisium', 'race'), Wd('crisium2', 'oxygen'), 0.7], [ST.stalemate, ST.storm, 0.3]], nz: [[Wd('crisium', 'race'), Wd('crisium2', 'oxygen'), 1]] };
+  const ph = phases[c] || [[ST.strike, ST.digin + 4, 0.35], [ST.counter, ST.iran + 3, 0.3], [ST.stalemate, ST.storm, 0.35]];
+  let v = 0; for (const [a, b, w] of ph) v += w * ss(a, b, t); return f * v;
+}
+
+// ===================== 2D OVERLAY =====================
+const out = document.createElement('canvas'); out.width = W; out.height = H; const ctx = out.getContext('2d');
+const GLOBE_CY = 905;
+function project(lat, lon, r = 1.0) { const p = geo(lat, lon, r); const camDir = mcam.position.clone().normalize(); const facing = p.clone().normalize().dot(camDir); const s = p.clone().project(mcam); return { x: (s.x * 0.5 + 0.5) * W, y: (1 - (s.y * 0.5 + 0.5)) * H, vis: facing > 0.08, f: facing }; }
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+function txt(s, x, y, size, color = '#fff', align = 'left', weight = 900, stroke = 6) { ctx.font = `${weight} ${size}px Mont`; ctx.textAlign = align; ctx.textBaseline = 'middle'; if (stroke) { ctx.lineJoin = 'round'; ctx.lineWidth = stroke; ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.strokeText(s, x, y); } ctx.fillStyle = color; ctx.fillText(s, x, y); }
+const SYM = { arm: 'arm', inf: 'inf', art: 'art', eng: 'eng', cmd: 'cmd', sup: 'sup', lnd: 'lnd' };
+function counter(x, y, c, type, label, a, t, scale = 1) {
+  if (a <= 0.01) return; const team = teamOf(c, t); const col = TEAMCOL[team];
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y); ctx.scale(scale, scale);
+  const w = 118, h = 54; ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 10;
+  rr(-w / 2, -h / 2, w, h, 7); ctx.fillStyle = 'rgba(10,12,18,0.88)'; ctx.fill(); ctx.shadowBlur = 0; ctx.lineWidth = 4; ctx.strokeStyle = col; ctx.stroke();
+  ctx.drawImage(flags[c], -w / 2 + 6, -h / 2 + 6, 56, 42);
+  // NATO-style symbol box
+  const bx = 8, by = -h / 2 + 8, bw = 44, bh = 38; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5; ctx.strokeRect(bx, by, bw, bh); ctx.beginPath();
+  if (type === 'arm') { ctx.ellipse(bx + bw / 2, by + bh / 2, 15, 9, 0, 0, 7); }
+  else if (type === 'inf') { ctx.moveTo(bx, by); ctx.lineTo(bx + bw, by + bh); ctx.moveTo(bx + bw, by); ctx.lineTo(bx, by + bh); }
+  else if (type === 'art') { ctx.arc(bx + bw / 2, by + bh / 2, 5, 0, 7); ctx.fillStyle = '#fff'; ctx.fill(); }
+  else if (type === 'eng') { ctx.moveTo(bx + 8, by + 26); ctx.lineTo(bx + 8, by + 13); ctx.lineTo(bx + 36, by + 13); ctx.lineTo(bx + 36, by + 26); ctx.moveTo(bx + 22, by + 13); ctx.lineTo(bx + 22, by + 26); }
+  else if (type === 'cmd') { ctx.moveTo(bx + 26, by + 4); ctx.lineTo(bx + 14, by + 21); ctx.lineTo(bx + 24, by + 21); ctx.lineTo(bx + 16, by + 35); }
+  else if (type === 'sup') { ctx.moveTo(bx, by + bh - 9); ctx.lineTo(bx + bw, by + bh - 9); }
+  else if (type === 'lnd') { ctx.moveTo(bx + 22, by + 6); ctx.lineTo(bx + 10, by + 32); ctx.moveTo(bx + 22, by + 6); ctx.lineTo(bx + 34, by + 32); }
+  ctx.stroke();
+  ctx.restore();
+  if (label) { ctx.save(); ctx.globalAlpha = a; txt(label, x, y + 27 * scale + 16, 22 * scale, '#fff', 'center', 800, 5); ctx.restore(); }
+}
+function drawArrow(A, t) {
+  if (t < A.t0 || t > A.t1 + 0.5) return;
+  const grow = easeOut((t - A.t0) / 1.4); const fade = 1 - ss(A.t1, A.t1 + 0.5, t);
+  const pts = []; const N = 60;
+  for (let i = 0; i <= N; i++) { const f = i / N * (A.pts.length - 1); const k = Math.min(A.pts.length - 2, Math.floor(f)); const ll = slerpLL(A.pts[k], A.pts[k + 1], f - k); pts.push(project(ll[0], ll[1], 1.002)); }
+  const n = Math.max(2, Math.floor(pts.length * grow)); const vis = pts.slice(0, n).filter(p => p.vis); if (vis.length < 2) return;
+  const col = TEAMCOL[A.team];
+  ctx.save(); ctx.globalAlpha = 0.92 * fade; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const wpx = A.width * (mcam.userData.zoomPx || 1);
+  for (const pass of [0, 1]) {
+    ctx.beginPath(); vis.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+    ctx.strokeStyle = pass ? col : 'rgba(0,0,0,0.75)'; ctx.lineWidth = pass ? wpx * 0.55 : wpx * 0.55 + 8; if (A.dashed) ctx.setLineDash(pass ? [wpx * 0.8, wpx * 0.6] : []); ctx.stroke(); ctx.setLineDash([]);
+  }
+  const e = vis[vis.length - 1], d = vis[Math.max(0, vis.length - 4)]; const ang = Math.atan2(e.y - d.y, e.x - d.x); const hs = wpx * 1.15;
+  ctx.beginPath(); ctx.moveTo(e.x + Math.cos(ang) * hs, e.y + Math.sin(ang) * hs); ctx.lineTo(e.x + Math.cos(ang + 2.4) * hs, e.y + Math.sin(ang + 2.4) * hs); ctx.lineTo(e.x + Math.cos(ang - 2.4) * hs, e.y + Math.sin(ang - 2.4) * hs); ctx.closePath();
+  ctx.fillStyle = col; ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(0,0,0,0.75)'; ctx.stroke(); ctx.fill();
+  if (A.fail && t > A.fail) { const k2 = easeOut((t - A.fail) / 0.3); ctx.strokeStyle = '#fff'; ctx.lineWidth = 10; ctx.beginPath(); const s = 34 * k2; ctx.moveTo(e.x - s, e.y - s); ctx.lineTo(e.x + s, e.y + s); ctx.moveTo(e.x + s, e.y - s); ctx.lineTo(e.x - s, e.y + s); ctx.stroke(); }
+  ctx.restore();
+}
+function drawBattle(B, t) {
+  if (t < B.t0 || t > B.t1) return; const a = ss(B.t0, B.t0 + 0.3, t) * (1 - ss(B.t1 - 0.4, B.t1, t)); const f = Math.floor(t * 12);
+  for (let i = 0; i < 7 * B.k; i++) {
+    const h1 = hash(f * 1.7 + i, B.at[0]), h2 = hash(i * 3.1 + f, B.at[1]), h3 = hash(f + i * 9.3, 7); if (h3 > 0.55) continue;
+    const ll = [B.at[0] + (h1 - 0.5) * B.r, B.at[1] + (h2 - 0.5) * B.r / Math.max(0.05, Math.cos(B.at[0] * DEG))];
+    const p = project(ll[0], ll[1], 1.001); if (!p.vis) continue; const r = (10 + h3 * 30) * (mcam.userData.zoomPx || 1);
+    const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r); g.addColorStop(0, `rgba(255,255,240,${a})`); g.addColorStop(0.3, `rgba(255,190,90,${0.8 * a})`); g.addColorStop(1, 'rgba(255,80,20,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 7); ctx.fill();
+  }
+  // crossed swords marker
+  const c = project(B.at[0], B.at[1], 1.001); if (c.vis && B.k >= 1) { ctx.save(); ctx.globalAlpha = a * (0.7 + 0.3 * Math.sin(t * 8)); ctx.font = '900 44px Mont'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineWidth = 6; ctx.strokeStyle = '#000'; ctx.strokeText('⚔', c.x, c.y - 52); ctx.fillStyle = '#ffd400'; ctx.fillText('⚔', c.x, c.y - 52); ctx.restore(); }
+}
+function placeLabel(name, ll, t0, t1, t, color = '#dfe6ee', size = 26) { if (t < t0 || t > t1) return; const p = project(ll[0], ll[1]); if (!p.vis) return; const a = ss(t0, t0 + 0.3, t) * (1 - ss(t1 - 0.3, t1, t)) * clamp((p.f - 0.08) * 6); ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = color; ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, 7); ctx.fill(); txt(name, p.x + 10, p.y - 14, size, color, 'left', 800, 5); ctx.restore(); }
+function iceMarker(ll, t, a) { const p = project(ll[0], ll[1]); if (!p.vis || a < 0.01) return; const r = 14 + 6 * Math.sin(t * 4 + ll[1]); ctx.save(); ctx.globalAlpha = a; const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 2); g.addColorStop(0, 'rgba(180,230,255,0.95)'); g.addColorStop(1, 'rgba(80,180,255,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r * 2, 0, 7); ctx.fill(); txt('❄', p.x, p.y, 24, '#e8f8ff', 'center', 900, 4); ctx.restore(); }
+
+// ----- panels -----
+function header(t) {
+  rr(18, 18, 1044, 132, 18); ctx.fillStyle = 'rgba(8,10,16,0.82)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 2; ctx.stroke();
+  txt('WHAT IF WW3 BROKE OUT', 40, 58, 40, '#fff', 'left', 900, 0); txt('ON THE MOON?', 40, 104, 40, '#ff4d4d', 'left', 900, 0);
+  const d = dayAt(t); const date = t < ST.incident ? 'MARCH 2049' : `DAY ${d}`;
+  rr(760, 34, 286, 64, 12); ctx.fillStyle = t < ST.incident ? 'rgba(255,255,255,0.1)' : 'rgba(220,40,40,0.9)'; ctx.fill(); txt(date, 903, 67, 38, '#fff', 'center', 900, 0);
+  txt('FICTIONAL SCENARIO', 903, 122, 20, 'rgba(255,255,255,0.6)', 'center', 800, 0);
+}
+window.overAt = t => [forcesAt, casAt].some(fn => { const mx = Math.max(1, ...Object.keys(COUNTRIES).map(c => fn(c, END))); return Object.keys(COUNTRIES).some(c => fn(c, t) > mx + 1e-6); });
+function bars(t) {
+  const y0 = 166; rr(18, y0, 1044, 262, 18); ctx.fillStyle = 'rgba(8,10,16,0.82)'; ctx.fill();
+  const panel = (x, title, fn, unitsSuffix) => {
+    txt(title, x, y0 + 30, 24, '#cfd6e0', 'left', 900, 0);
+    const vals = Object.keys(COUNTRIES).map(c => [c, fn(c, t)]).filter(v => v[1] > 0.5).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    const mx = Math.max(1, ...Object.keys(COUNTRIES).map(c => fn(c, END)));
+    let tot = [0, 0]; Object.keys(COUNTRIES).forEach(c => { const tm = teamOf(c, t); if (tm < 2) tot[tm] += fn(c, t); });
+    vals.forEach(([c, v], i) => { const y = y0 + 64 + i * 32; ctx.drawImage(flags[c], x, y - 11, 30, 22); const r = v / mx; const bw = r <= 1 ? 330 * r : 330 + 62 * (1 - Math.exp(-(r - 1) / 0.2)); ctx.fillStyle = TEAMCOL[teamOf(c, t)]; ctx.globalAlpha = 0.9; ctx.fillRect(x + 38, y - 10, bw, 20); ctx.globalAlpha = 1; txt(Math.round(v).toLocaleString('en-US'), x + 44 + bw, y, 19, '#fff', 'left', 800, 0); });
+    // team totals
+    const ty = y0 + 64 + 6 * 32 - 4; ctx.fillStyle = TEAMCOL[0]; txt('◆ ' + Math.round(tot[0]).toLocaleString('en-US'), x, ty + 10, 20, TEAMCOL[0], 'left', 900, 0); txt('◆ ' + Math.round(tot[1]).toLocaleString('en-US'), x + 200, ty + 10, 20, TEAMCOL[1], 'left', 900, 0);
+  };
+  panel(40, 'FORCES ON THE MOON', forcesAt); panel(560, 'CASUALTIES', casAt);
+  ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(540, y0 + 18, 2, 226);
+}
+function legend(t) {
+  const y = 452; const items = [[0, 'ARTEMIS COALITION'], [1, 'LUNAR PACT'], [t < T_INDIA_JOIN ? 2 : 3, t < T_INDIA_JOIN ? 'NON-ALIGNED' : 'NEUTRAL']];
+  if (t > tShared) items.push([5, 'SHARED ZONE']);
+  let x = 30; items.forEach(([tm, s]) => { ctx.fillStyle = TEAMCOL[tm]; ctx.beginPath(); ctx.arc(x + 10, y, 10, 0, 7); ctx.fill(); txt(s, x + 28, y, 22, '#fff', 'left', 800, 5); ctx.font = '800 22px Mont'; x += 48 + ctx.measureText(s).width; });
+}
+const CATCOL = { WAR: '#ff3b3b', EARTH: '#ff9a1f', PEACE: '#2ecc71', MISC: '#8a93a3' };
+function newsPanel(t) {
+  const x = 24, y = 1468, w = 880, h = 262; rr(x, y, w, h, 16); ctx.fillStyle = 'rgba(8,10,16,0.88)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 2; ctx.stroke();
+  rr(x + 14, y + 12, 96, 34, 6); ctx.fillStyle = '#d61f1f'; ctx.fill(); txt('LIVE', x + 62, y + 30, 22, '#fff', 'center', 900, 0);
+  txt('LNN · LUNAR NEWS NETWORK', x + 124, y + 30, 22, '#cfd6e0', 'left', 900, 0); txt('(FICTIONAL)', x + w - 18, y + 30, 18, 'rgba(255,255,255,0.45)', 'right', 800, 0);
+  const items = NEWS.filter(n => n.t <= t).slice(-3).reverse();
+  items.forEach((n, i) => { const yy = y + 82 + i * 62; const age = t - n.t; const slide = i === 0 ? easeOut(age / 0.35) : 1;
+    ctx.save(); ctx.globalAlpha = (i === 0 ? slide : 1) * (1 - i * 0.22); ctx.translate((1 - slide) * -60, 0);
+    rr(x + 14, yy - 18, 86, 36, 6); ctx.fillStyle = CATCOL[n.cat]; ctx.fill(); txt(n.cat, x + 57, yy, 19, '#fff', 'center', 900, 0);
+    let s = n.text; ctx.font = '800 25px Mont'; while (ctx.measureText(s).width > w - 140 && s.length > 4) s = s.slice(0, -2); if (s !== n.text) s = s.trimEnd() + '…';
+    txt(s, x + 114, yy, 25, i === 0 && age < 1.2 && Math.floor(age * 6) % 2 === 0 ? '#ffd400' : '#fff', 'left', 800, 0); ctx.restore(); });
+}
+
+// ===================== FRAME =====================
+// battle cut-in windows
+const CUTS = [
+  { t0: Wd('incident', 'american') - 0.2, t1: ST.strike - 0.1, kind: 'standoff' },
+  { t0: ST.physics + 0.1, t1: ST.digin - 0.1, kind: 'pact' },
+  { t0: Wd('crisium2', 'battle') - 0.1, t1: ST.massdriver - 0.1, kind: 'crisium' },
+];
+function renderGround(t, cut) {
+  vlist.forEach(v => v.visible = false); flashes.forEach(f => f.visible = false); iceField.visible = false;
+  const dust = []; const trc = []; const u = (t - cut.t0) / (cut.t1 - cut.t0);
+  const sunDir = new THREE.Vector3(-0.55, 0.22, 0.8).normalize(); gsun.position.copy(sunDir).multiplyScalar(400); gsun.target.position.set(0, 0, 0);
+  const setV = (id, x, z, ry) => { const v = vehicles[id]; v.visible = true; v.position.set(x, heightAt(x, z), z); v.rotation.y = ry; return v; };
+  const flash = (i, p, s, k = 1) => { const f = flashes[i]; f.visible = true; f.position.copy(p); f.scale.setScalar(s); f.material.opacity = k; };
+  if (cut.kind === 'standoff') {
+    iceField.visible = true; iceField.position.set(0, heightAt(0, 0) + 0.25, 0);
+    const a = setV('usRover', -9 + 2 * ease(u * 1.4), 0, Math.PI / 2); const b = setV('cnRover', 9 - 2 * ease(u * 1.4), 0, -Math.PI / 2);
+    [a, b].forEach(v => { v.userData.lamp.intensity = 800; v.userData.turret.rotation.y = 0; });
+    if (u > 0.82) { const k = Math.max(0, 1 - (u - 0.82) / 0.08); flash(0, new THREE.Vector3(7.5 - 2, 2.2, 0).add(new THREE.Vector3(-3.8, 0, 0)), 8 * k + 0.01, k); }
+    gcam.position.set(lerp(-2, 2, u), 3.2, lerp(22, 16, u)); gcam.lookAt(0, 1.8, 0); gcam.fov = 42;
+  } else if (cut.kind === 'pact') {
+    for (let i = 0; i < 4; i++) { const v = setV('pact' + i, -40 + i * 7 + u * 26, -10 + (i % 2) * 8, Math.PI / 2 - 0.15); v.userData.turret.rotation.y = 0.2; }
+    // muzzle flashes from pact tanks, impacts in front of them (coalition arty)
+    for (let s = 0; s < 6; s++) { const ts = cut.t0 + 0.35 + s * 0.8; const tank = vehicles['pact' + (s % 4)];
+      if (t > ts && t < ts + 0.12) { const mp = new THREE.Vector3(0, 2.15, 6.2).applyMatrix4(tank.matrixWorld); flash(s, mp, 6, 1); }
+      const ix = -20 + s * 9 + ((s * 37) % 11), iz = 14 - (s % 3) * 9; impactDust(dust, t, ix, iz, ts + 0.5, 420, s * 13 + 5, 1.2);
+      if (t > ts + 0.5 && t < ts + 0.62) flash(10 + s, new THREE.Vector3(ix, heightAt(ix, iz) + 1, iz), 10, 1); }
+    vlist.forEach(v => v.updateMatrixWorld());
+    gcam.position.set(lerp(-34, -18, u), 2.4, 34); gcam.lookAt(lerp(-20, -6, u), 3, -2); gcam.fov = 46;
+  } else if (cut.kind === 'crisium') {
+    setV('lander0', 18, -12, 0.3); setV('lander1', 30, 6, -0.4);
+    for (let i = 0; i < 3; i++) { const v = setV('anz' + i, -30 + i * 6 + u * 10, 16 - i * 7, Math.PI / 2 + 0.35); v.userData.turret.rotation.y = -0.3; }
+    vlist.forEach(v => v.updateMatrixWorld());
+    for (let s = 0; s < 5; s++) { const ts = cut.t0 + 0.3 + s * 0.95; const tank = vehicles['anz' + (s % 3)];
+      if (t > ts && t < ts + 0.12) flash(s, new THREE.Vector3(0, 2.15, 6.2).applyMatrix4(tank.matrixWorld), 6, 1);
+      // tracer flying to the landers
+      const tgt = s % 2 ? vehicles.lander1.position : vehicles.lander0.position; const mp = new THREE.Vector3(0, 2.15, 6.2).applyMatrix4(tank.matrixWorld);
+      const fu = (t - ts) / 0.45; if (fu > 0 && fu < 1) { const p = mp.clone().lerp(tgt.clone().add(new THREE.Vector3(0, 3, 0)), fu); trc.push(p.x, p.y + Math.sin(fu * Math.PI) * 1.2, p.z); }
+      impactDust(dust, t, tgt.x + (s - 2) * 2, tgt.z + 2, ts + 0.45, 380, s * 19 + 3, 1.0);
+      if (t > ts + 0.45 && t < ts + 0.6) flash(10 + s, tgt.clone().add(new THREE.Vector3(0, 3.5, 0)), 9, 1); }
+    gcam.position.set(lerp(-42, -30, u), 3.0, lerp(30, 26, u)); gcam.lookAt(lerp(6, 14, u), 3.5, -2); gcam.fov = 44;
+  }
+  for (let i = 0; i < DUSTN; i++) { if (i * 3 < dust.length) { dustPos[i * 3] = dust[i * 3]; dustPos[i * 3 + 1] = dust[i * 3 + 1]; dustPos[i * 3 + 2] = dust[i * 3 + 2]; } else { dustPos[i * 3] = 0; dustPos[i * 3 + 1] = -500; dustPos[i * 3 + 2] = 0; } }
+  dustGeo.attributes.position.needsUpdate = true;
+  for (let i = 0; i < 60; i++) { if (i * 3 < trc.length) tracerPos.set([trc[i * 3], trc[i * 3 + 1], trc[i * 3 + 2]], i * 3); else tracerPos.set([0, -500, 0], i * 3); } tracerGeo.attributes.position.needsUpdate = true;
+  gcam.updateProjectionMatrix(); renderer.toneMappingExposure = 1.0;
+  groundComposer.render();
+}
+
+window.renderFrame = async (t) => {
+  const cut = CUTS.find(c => t >= c.t0 && t < c.t1);
+  ctx.clearRect(0, 0, W, H);
+  if (cut) {
+    renderGround(t, cut);
+    ctx.drawImage(renderer.domElement, 0, 0);
+    // cinematic labels for cut-ins
+    const lab = { standoff: 'SHACKLETON ICE FIELD · DAY 1', pact: 'HAWORTH CRATER · DAY 3', crisium: 'MARE CRISIUM · DAY 27' }[cut.kind];
+    const a = ss(cut.t0, cut.t0 + 0.3, t); ctx.save(); ctx.globalAlpha = a; rr(24, 470, 640, 54, 10); ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fill(); txt('● ' + lab, 44, 497, 26, '#fff', 'left', 900, 0); ctx.restore();
+  } else {
+    // map
+    const tm = t < ST.teams - 0.4 ? Wd('strike', 'seize') + 2.0 + t * 0.3 : t;
+    updateCPs(tm); moonMat.uniforms.time.value = t;
+    const ck = camKey(t); const camP = geo(ck.lat, ck.lon, ck.d);
+    const north = new THREE.Vector3(-Math.sin(ck.lat * DEG) * Math.cos(ck.lon * DEG), Math.cos(ck.lat * DEG), Math.sin(ck.lat * DEG) * Math.sin(ck.lon * DEG));
+    mcam.position.copy(camP); mcam.up.copy(north); mcam.lookAt(0, 0, 0);
+    // shift globe down a bit (view offset) so panels fit
+    mcam.setViewOffset(W, H, 0, -(GLOBE_CY - H / 2), W, H); mcam.updateProjectionMatrix();
+    mcam.userData.zoomPx = clamp(3.2 / ck.d, 0.45, 1.1);
+    // light from upper-left of the camera
+    const right = new THREE.Vector3().crossVectors(north, camP).normalize(); moonMat.uniforms.L.value.copy(camP.clone().normalize().multiplyScalar(0.8).addScaledVector(north, 0.55).addScaledVector(right, -0.45).normalize());
+    moonMat.uniforms.storm.value = ss(Wd('storm', 'floods') - 0.5, Wd('storm', 'radiation'), t) * (1 - ss(Wd('storm', 'nobody'), ST.talks, t));
+    moonMat.uniforms.fillK.value = 1 - 0.6 * moonMat.uniforms.storm.value;
+    // earth beat: pull out and show Earth
+    const eb = ss(ST.earth - 0.2, ST.earth + 1.2, t) * (1 - ss(ST.india - 0.6, ST.india + 0.4, t));
+    earth.visible = eb > 0.01; if (earth.visible) { const dir = camP.clone().normalize(); earth.position.copy(dir.clone().multiplyScalar(-40).addScaledVector(north, 6).addScaledVector(right, -8)); mcam.position.copy(camP.clone().multiplyScalar(1 + eb * 3.5)); mcam.lookAt(earth.position.clone().multiplyScalar(0.18 * eb)); }
+    mapComposer.bloom.strength = 0.35;
+    mapComposer.render();
+    ctx.drawImage(renderer.domElement, 0, 0);
+    // ice markers (south pole)
+    const iceA = ss(Wd('ice', 'frozen') - 0.2, Wd('ice', 'frozen') + 0.4, t) * (1 - ss(tShared + 1, tShared + 2, t) * 0.0);
+    ['SHACKLETON', 'HAWORTH', 'SHOEMAKER', 'FAUSTINI', 'CABEUS', 'DEGERLACHE'].forEach(k => iceMarker(P[k], t, iceA * (ck.d < 4.5 ? 1 : 0.4)));
+    // place labels
+    const L = (n, k, t0, t1, c) => placeLabel(n, P[k], t0, t1, t, c);
+    L('SHACKLETON', 'SHACKLETON', ST.ice + 1.4, ST.earth, '#bfe8ff'); L('HAWORTH', 'HAWORTH', ST.ice + 1.8, ST.earth, '#bfe8ff'); L('SHOEMAKER', 'SHOEMAKER', ST.ice + 2.1, ST.earth, '#bfe8ff');
+    L('DE GERLACHE', 'DEGERLACHE', ST.lastpush - 0.3, ST.totals, '#bfe8ff');
+    L('TRANQUILITY BASE', 'TRANQUILITY', Wd('teams', 'america'), ST.pact, '#fff'); L('TRANQUILITY BASE', 'TRANQUILITY', ST.counter - 0.2, ST.counter + 4, '#fff');
+    L('VON KÁRMÁN', 'VONKARMAN', Wd('pact', 'china'), ST.ice, '#fff'); L('MARE MOSCOVIENSE', 'MOSCOVIENSE', Wd('pact', 'russia'), ST.ice, '#fff'); L('MARE MOSCOVIENSE', 'MOSCOVIENSE', ST.massdriver, ST.counter, '#fff');
+    L('SHIV SHAKTI POINT', 'SHIVSHAKTI', ST.india - 0.2, ST.crisium, '#ffd28a'); L('MARE CRISIUM', 'CRISIUM', ST.crisium - 0.2, ST.massdriver, '#fff');
+    // mass driver: rocks flung into orbit
+    if (t > ST.massdriver + 1 && t < Wd('raid', 'apart')) { const p = project(...P.MOSCOVIENSE); if (p.vis) for (let k = 0; k < 4; k++) { const ph = ((t * 0.9 + k * 0.25) % 1); const q = project(P.MOSCOVIENSE[0] + 4 + ph * 30, P.MOSCOVIENSE[1] - 10 - ph * 40, 1 + ph * 0.8); ctx.save(); ctx.strokeStyle = 'rgba(255,90,60,0.9)'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.globalAlpha = 1 - ph; ctx.stroke(); ctx.restore(); } }
+    // arrows, battles, units
+    ARROWS.forEach(A => drawArrow(A, tm));
+    BATTLES.forEach(B => drawBattle(B, t < ST.teams - 0.4 ? tm : t));
+    const zoomS = mcam.userData.zoomPx;
+    UNITS.forEach(u => { const pos = unitPos(u, tm); if (!pos || tm > u.tOff + 0.5) return; const p = project(pos[0], pos[1], 1.004); if (!p.vis) return;
+      const a = (t < ST.teams - 0.4 ? 1 : ss(pos[2], pos[2] + 0.35, t)) * (1 - ss(u.tOff, u.tOff + 0.5, tm)) * clamp((p.f - 0.08) * 5) * (1 - 0.85 * moonMat.uniforms.storm.value);
+      const pop = t < ST.teams - 0.4 ? 1 : 1 + 0.35 * (1 - easeOut((t - pos[2]) / 0.3)); counter(p.x, p.y, u.c, u.type, zoomS > 0.6 ? u.label : '', a, t, Math.max(0.55, Math.min(1.0, zoomS * 0.95)) * pop); });
+    // radiation banner
+    const st = moonMat.uniforms.storm.value; if (st > 0.02) { ctx.save(); ctx.globalAlpha = st; for (let i = 0; i < 40; i++) { const y = 470 + ((i * 97 + t * 900) % 880); ctx.strokeStyle = 'rgba(255,220,120,0.35)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(-50 + (i * 53) % 1100, y); ctx.lineTo(60 + (i * 53) % 1100, y + 60); ctx.stroke(); } rr(240, 492, 600, 64, 12); ctx.fillStyle = 'rgba(255,190,0,0.92)'; ctx.fill(); txt('☢ RADIATION ALERT ☢', 540, 524, 34, '#000', 'center', 900, 0); ctx.restore(); }
+    // treaty banner
+    if (t > Wd('treaty', 'treaty') - 0.1 && t < ST.end + 2) { const a = ss(Wd('treaty', 'treaty') - 0.1, Wd('treaty', 'treaty') + 0.3, t) * (1 - ss(ST.end + 1.5, ST.end + 2, t)); ctx.save(); ctx.globalAlpha = a; rr(150, 492, 780, 70, 14); ctx.fillStyle = 'rgba(20,120,70,0.92)'; ctx.fill(); txt('TREATY OF TRANQUILITY', 540, 527, 36, '#fff', 'center', 900, 0); ctx.restore(); }
+    // CTA
+    if (t > ST.cta - 0.2) { const a = ss(ST.cta - 0.2, ST.cta + 0.3, t); ctx.save(); ctx.globalAlpha = a; rr(120, 488, 840, 84, 16); ctx.fillStyle = 'rgba(255,212,0,0.95)'; ctx.fill(); txt('WHICH SIDE WOULD YOU JOIN? ⬇', 540, 530, 38, '#111', 'center', 900, 0); ctx.restore(); }
+    legend(t);
+  }
+  header(t); bars(t); newsPanel(t);
+  return out.toDataURL('image/jpeg', 0.92);
+};
+window.TIMES = ST; window.CAMK = camKey; window.CKS = CK; window.READY = true;
+</script></body></html>
