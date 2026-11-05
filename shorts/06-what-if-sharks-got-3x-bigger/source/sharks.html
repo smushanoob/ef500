@@ -1,0 +1,600 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>html,body{margin:0;background:#000}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+const W = 1080, H = 1920, DEG = Math.PI / 180, END = 130.0, FPS = 30;
+const VO = await (await fetch('vo.json')).json();
+const SEG = {}; VO.segs.forEach(s => SEG[s.id] = s);
+const ST = {}; VO.segs.forEach((s, i) => ST[s.id] = i ? s.s : 0);
+const Wd = (sid, w, n = 0) => { const m = SEG[sid].words.filter(x => x.w.replace(/[.,?:!]/g, '').toLowerCase().startsWith(w.toLowerCase())); if (!m[n]) throw new Error('word ' + sid + ':' + w); return m[n].s; };
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const ss = (a, b, x) => { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+const ease = t => { t = clamp(t); return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+const easeOut = t => 1 - Math.pow(1 - clamp(t), 3);
+const win = (t, a, b, fi = 0.3, fo = 0.3) => ss(a - fi * 0.5, a + fi * 0.5, t) * (1 - ss(b - fo * 0.5, b + fo * 0.5, t));
+const pop = (t, a, d = 0.28) => { const x = clamp((t - a) / d); return x <= 0 ? 0 : 1 + 0.18 * Math.sin(x * Math.PI) * (1 - x) * 2 - 0.0; };
+
+// ---------- fonts / images ----------
+const ff = new FontFace('Mont', 'url(assets/montserrat-latin-900-normal.woff2)', { weight: '900' }); await ff.load(); document.fonts.add(ff);
+const ff8 = new FontFace('Mont', 'url(assets/montserrat-latin-800-normal.woff2)', { weight: '800' }); await ff8.load(); document.fonts.add(ff8);
+const loadImg = src => new Promise(r => { const im = new Image(); im.onload = () => r(im); im.onerror = () => r(null); im.src = src; });
+const FLAGS = {}; for (const c of ['us', 'au', 'bs', 'nz', 'za', 'mz', 'gb', 'no', 'ca']) { const im = await loadImg(`assets/flag_${c}.svg`); const cv = document.createElement('canvas'); cv.width = 160; cv.height = 120; cv.getContext('2d').drawImage(im, 0, 0, 160, 120); FLAGS[c] = cv; }
+const MAPIMG = await loadImg('assets/day.jpg');
+// ocean mask from topo (0 = sea level / ocean)
+const topo = await loadImg('assets/topo.png');
+const OCEAN = document.createElement('canvas'); OCEAN.width = 2048; OCEAN.height = 1024;
+{ const c = OCEAN.getContext('2d'); c.drawImage(topo, 0, 0); const dt = c.getImageData(0, 0, 2048, 1024); c.drawImage(MAPIMG, 0, 0, 2048, 1024); const d = c.getImageData(0, 0, 2048, 1024);
+  for (let i = 0; i < d.data.length; i += 4) { const r = d.data[i], g = d.data[i + 1], b = d.data[i + 2]; const oc = (b > r * 1.35 + 6 && b >= g * 1.0 && dt.data[i] < 6) || (b > r * 2.2 && b > 40); d.data[i] = 255; d.data[i + 1] = 255; d.data[i + 2] = 255; d.data[i + 3] = oc ? 255 : 0; } c.putImageData(d, 0, 0); c.filter = 'blur(1px)'; }
+let SHOTS = []; try { SHOTS = await (await fetch('shots.json')).json(); } catch (e) { SHOTS = []; }
+
+// ---------- output canvas ----------
+const out = document.createElement('canvas'); out.width = W; out.height = H; const ctx = out.getContext('2d');
+const tmp = document.createElement('canvas'); tmp.width = W; tmp.height = H; const tctx = tmp.getContext('2d');
+function rr(x, y, w, h, r, c = ctx) { c.beginPath(); c.roundRect(x, y, w, h, r); }
+function txt(s, x, y, size, color = '#fff', align = 'left', weight = 900, stroke = 6, c = ctx) { c.font = `${weight} ${size}px Mont`; c.textAlign = align; c.textBaseline = 'middle'; if (stroke) { c.lineJoin = 'round'; c.lineWidth = stroke; c.strokeStyle = 'rgba(0,0,0,0.85)'; c.strokeText(s, x, y); } c.fillStyle = color; c.fillText(s, x, y); }
+const tw = (s, size, weight = 900) => { ctx.font = `${weight} ${size}px Mont`; return ctx.measureText(s).width; };
+const TEAL = '#35e0d0', RED = '#ff3b3b', YEL = '#ffd400', ORG = '#ff9a1f', BLUE = '#3d8bff';
+
+// shark side silhouette (nose at x=1)
+const SIL = [[1, 0], [0.95, 0.04], [0.86, 0.075], [0.74, 0.095], [0.6, 0.1], [0.555, 0.105], [0.5, 0.27], [0.47, 0.25], [0.455, 0.1], [0.3, 0.07], [0.2, 0.045], [0.13, 0.03], [0.04, 0.2], [0.02, 0.19], [0.07, 0.0], [0.03, -0.14], [0.05, -0.15], [0.13, -0.025], [0.26, -0.045], [0.34, -0.055], [0.37, -0.1], [0.41, -0.065], [0.6, -0.085], [0.66, -0.2], [0.69, -0.2], [0.73, -0.085], [0.86, -0.06], [0.95, -0.03]];
+function sharkIcon(x, y, len, color, dir = 1, alpha = 1, c = ctx) { c.save(); c.globalAlpha *= alpha; c.translate(x, y); c.scale(dir, 1); c.beginPath(); SIL.forEach(([a, b], i) => { const px = (a - 0.5) * len, py = -b * len; i ? c.lineTo(px, py) : c.moveTo(px, py); }); c.closePath(); c.fillStyle = color; c.fill(); c.restore(); }
+function badge(text, x, y, size, bg, fg = '#fff', a = 1, align = 'center', padX = 22, h = null) { if (a <= 0) return; ctx.save(); ctx.globalAlpha *= a; const w = tw(text, size) + padX * 2; const hh = h || size * 1.6; const x0 = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x; rr(x0, y - hh / 2, w, hh, hh * 0.22); ctx.fillStyle = bg; ctx.fill(); txt(text, x0 + w / 2, y + size * 0.04, size, fg, 'center', 900, 0); ctx.restore(); return w; }
+function panelBox(x, y, w, h, a = 1, col = 'rgba(6,14,22,0.82)') { ctx.save(); ctx.globalAlpha *= a; rr(x, y, w, h, 22); ctx.fillStyle = col; ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 2; ctx.stroke(); ctx.restore(); }
+const fmt = n => Math.round(n).toLocaleString('en-US');
+
+// =====================================================================
+//  3D UNDERWATER
+// =====================================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1); renderer.setSize(W, H); renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.05;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+const sea = new THREE.Scene();
+const cam = new THREE.PerspectiveCamera(42, W / H, 0.1, 2000);
+const FOGC = new THREE.Color(0x0b4466); sea.fog = new THREE.FogExp2(FOGC, 0.01);
+// background dome
+const dome = new THREE.Mesh(new THREE.SphereGeometry(900, 48, 24), new THREE.ShaderMaterial({ side: THREE.BackSide, depthWrite: false, fog: false, uniforms: { top: { value: new THREE.Color(0x3fb4d8) }, mid: { value: new THREE.Color(0x0b4466) }, bot: { value: new THREE.Color(0x02101c) }, sunUp: { value: 1 } },
+  vertexShader: `varying vec3 vD; void main(){ vD = normalize(position); gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }`,
+  fragmentShader: `uniform vec3 top,mid,bot; uniform float sunUp; varying vec3 vD; void main(){ float y=vD.y; vec3 c = y>0. ? mix(mid, top, pow(y,1.6)) : mix(mid, bot, pow(-y,0.7)); c += vec3(0.55,0.8,0.9)*pow(max(y,0.),18.)*0.9*sunUp; gl_FragColor=vec4(c,1.); }` }));
+sea.add(dome);
+const sun = new THREE.DirectionalLight(0xdff6ff, 2.4); sun.position.set(0.3, 1, 0.25); sea.add(sun);
+sea.add(new THREE.HemisphereLight(0x7fd0ee, 0x06202e, 1.1));
+// marine snow
+const SNOW_N = 2600; const snowG = new THREE.BufferGeometry(); { const p = new Float32Array(SNOW_N * 3); const r = rng(7); for (let i = 0; i < SNOW_N; i++) { p[i * 3] = (r() - 0.5) * 120; p[i * 3 + 1] = (r() - 0.5) * 80; p[i * 3 + 2] = (r() - 0.5) * 120; } snowG.setAttribute('position', new THREE.BufferAttribute(p, 3)); }
+const snow = new THREE.Points(snowG, new THREE.PointsMaterial({ color: 0xcfefff, size: 0.09, transparent: true, opacity: 0.55, depthWrite: false })); sea.add(snow);
+// god rays
+const rayTex = (() => { const c = document.createElement('canvas'); c.width = 64; c.height = 256; const g = c.getContext('2d'); const gr = g.createLinearGradient(0, 0, 0, 256); gr.addColorStop(0, 'rgba(255,255,255,0.9)'); gr.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = gr; g.fillRect(0, 0, 64, 256); const g2 = g.createLinearGradient(0, 0, 64, 0); const d = g.getImageData(0, 0, 64, 256); for (let y = 0; y < 256; y++) for (let x = 0; x < 64; x++) { const k = Math.sin(x / 63 * Math.PI); d.data[(y * 64 + x) * 4 + 3] *= k * k; } g.putImageData(d, 0, 0); const t = new THREE.CanvasTexture(c); return t; })();
+const rays = []; for (let i = 0; i < 9; i++) { const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: rayTex, transparent: true, opacity: 0.12, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, color: 0x9fe8ff, side: THREE.DoubleSide })); m.userData.seed = i; sea.add(m); rays.push(m); }
+// surface (seen from below)
+const surf = new THREE.Mesh(new THREE.PlaneGeometry(400, 400, 1, 1), new THREE.ShaderMaterial({ transparent: true, depthWrite: false, fog: false, side: THREE.DoubleSide, uniforms: { time: { value: 0 }, camP: { value: new THREE.Vector3() } },
+  vertexShader: `varying vec3 vW; void main(){ vec4 w=modelMatrix*vec4(position,1.); vW=w.xyz; gl_Position=projectionMatrix*viewMatrix*w; }`,
+  fragmentShader: `uniform float time; uniform vec3 camP; varying vec3 vW;
+    float h(vec2 p){ return sin(p.x*0.9+time*1.3)*0.5+sin(p.y*1.3-time*1.1)*0.5+sin((p.x+p.y)*0.6+time*0.7)*0.6+sin((p.x-p.y)*2.1+time*2.)*0.25; }
+    void main(){ vec3 v=normalize(vW-camP); float up=clamp(v.y,0.,1.); float snell=smoothstep(0.62,0.80,up); float w=h(vW.xz*0.35); float rip=0.5+0.5*sin(w*3.);
+      vec3 deep=vec3(0.05,0.32,0.45); vec3 sky=vec3(0.75,0.95,1.0); vec3 c=mix(deep*(0.7+0.5*rip), sky*(0.75+0.35*rip), snell); float d=length(vW.xz-camP.xz); float a=exp(-d*0.012)*0.95; gl_FragColor=vec4(c, a); }` }));
+surf.rotation.x = -Math.PI / 2; sea.add(surf);
+
+function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+
+// ---------- procedural sharks / whales ----------
+function crInterp(tab, u, k) { // Catmull-Rom over rows [u, ...]
+  let i = 0; while (i < tab.length - 2 && u > tab[i + 1][0]) i++;
+  const p0 = tab[Math.max(0, i - 1)][k], p1 = tab[i][k], p2 = tab[i + 1][k], p3 = tab[Math.min(tab.length - 1, i + 2)][k];
+  const f = clamp((u - tab[i][0]) / (tab[i + 1][0] - tab[i][0])); const f2 = f * f, f3 = f2 * f;
+  return 0.5 * ((2 * p1) + (-p0 + p2) * f + (2 * p0 - 5 * p1 + 4 * p2 - p3) * f2 + (-p0 + 3 * p1 - 3 * p2 + p3) * f3);
+}
+function finGeo(pts, thick, basis, origin, part) {
+  const sh = new THREE.Shape(); sh.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) { const p = pts[i]; if (p.length === 4) sh.quadraticCurveTo(p[0], p[1], p[2], p[3]); else sh.lineTo(p[0], p[1]); }
+  const g = new THREE.ExtrudeGeometry(sh, { depth: thick, bevelEnabled: true, bevelThickness: thick * 0.5, bevelSize: thick * 0.6, bevelSegments: 2, curveSegments: 14 });
+  g.translate(0, 0, -thick / 2);
+  const m = new THREE.Matrix4().makeBasis(basis[0], basis[1], basis[2]); m.setPosition(origin); g.applyMatrix4(m);
+  const n = g.attributes.position.count; const uv = new Float32Array(n * 2), pa = new Float32Array(n).fill(part);
+  for (let i = 0; i < n; i++) { uv[i * 2] = 0.5 - g.attributes.position.getX(i); uv[i * 2 + 1] = 0.25; }
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2)); g.setAttribute('part', new THREE.BufferAttribute(pa, 1)); g.deleteAttribute('normal'); g.computeVertexNormals();
+  return g;
+}
+const X = new THREE.Vector3(1, 0, 0), Y = new THREE.Vector3(0, 1, 0), Z = new THREE.Vector3(0, 0, 1);
+function buildBody(sp) {
+  const N = 150, M = 44, pos = [], uv = [], part = [], idx = [];
+  for (let i = 0; i <= N; i++) { const u = (i / N) * sp.bodyEnd; const h = Math.max(0, crInterp(sp.prof, u, 1)), w = Math.max(0, crInterp(sp.prof, u, 2)), c = crInterp(sp.prof, u, 3);
+    for (let j = 0; j <= M; j++) { const th = -Math.PI / 2 + (j / M) * Math.PI * 2; const s = Math.sin(th), co = Math.cos(th);
+      const y = c + h * s * (s < 0 ? sp.belly : 1) * (1 + (sp.flatTop || 0) * Math.max(0, s) * (1 - u) * -0.4); const z = w * co * (1 + 0.08 * Math.max(0, -s));
+      pos.push(0.5 - u, y, z); uv.push(u, j / M); part.push(0); } }
+  for (let i = 0; i < N; i++) for (let j = 0; j < M; j++) { const a = i * (M + 1) + j, b = a + M + 1; idx.push(a, b, a + 1, b, b + 1, a + 1); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setAttribute('part', new THREE.Float32BufferAttribute(part, 1)); g.setIndex(idx); g.computeVertexNormals();
+  return g;
+}
+const topY = (sp, u) => crInterp(sp.prof, u, 3) + crInterp(sp.prof, u, 1);
+const botY = (sp, u) => crInterp(sp.prof, u, 3) - crInterp(sp.prof, u, 1) * sp.belly;
+function buildAnimal(sp) {
+  const parts = [buildBody(sp)];
+  const th = sp.finT;
+  // first dorsal
+  { const [u0, u1, hgt, back] = sp.dorsal; const x0 = 0.5 - u0, x1 = 0.5 - u1; const y0 = topY(sp, u0) - 0.012, y1 = topY(sp, u1) - 0.012;
+    parts.push(finGeo([[x0, y0], [x0 - back * 0.55, y0 + hgt * 0.75, x0 - back, y0 + hgt], [x1 + 0.01, y1 + hgt * 0.25, x1, y1]], th, [X, Y, Z], new THREE.Vector3(0, 0, 0), 1)); }
+  // second dorsal + anal (small)
+  if (sp.d2) { const [u0, u1, hgt] = sp.d2; const x0 = 0.5 - u0, x1 = 0.5 - u1; const y0 = topY(sp, u0) - 0.006;
+    parts.push(finGeo([[x0, y0], [x0 - (x0 - x1) * 0.8, y0 + hgt], [x1, topY(sp, u1) - 0.004]], th * 0.7, [X, Y, Z], new THREE.Vector3(), 1));
+    const yb = botY(sp, u0) + 0.006; parts.push(finGeo([[x0, yb], [x0 - (x0 - x1) * 0.8, yb - hgt * 0.9], [x1, botY(sp, u1) + 0.004]], th * 0.7, [X, Y, Z], new THREE.Vector3(), 1)); }
+  // paired fins (pectoral, pelvic)
+  const paired = (u, chord, span, back, droop, spread, part) => { for (const sd of [1, -1]) {
+      const c = crInterp(sp.prof, u, 3), h = crInterp(sp.prof, u, 1), w = crInterp(sp.prof, u, 2);
+      const S = new THREE.Vector3(-back, -droop, sd * spread).normalize(); const A = X.clone(); const Nn = new THREE.Vector3().crossVectors(A, S).normalize(); const S2 = new THREE.Vector3().crossVectors(Nn, A).normalize();
+      // shape in (a = along x, b = along S2)
+      const tipA = -span * back * 1.4, tipB = span;
+      parts.push(finGeo([[0.0, 0], [tipA * 0.25, tipB * 0.7, tipA, tipB], [tipA - chord * 0.18, tipB * 0.98], [tipA * 0.6 - chord * 0.6, tipB * 0.35, -chord, 0]], th * 0.9, [A, S2, Nn], new THREE.Vector3(0.5 - u, c - h * sp.belly * 0.5, sd * w * 0.78), part)); } };
+  paired(sp.pect[0], sp.pect[1], sp.pect[2], sp.pect[3], sp.pect[4], 1, 2);
+  if (sp.pelv) paired(sp.pelv[0], sp.pelv[1], sp.pelv[2], 0.6, 0.6, 1, 2);
+  // caudal
+  { const u0 = sp.bodyEnd - 0.03; const x0 = 0.5 - u0; const c = crInterp(sp.prof, u0, 3); const [up, lo, len] = sp.caudal;
+    const pts = [[x0, c + 0.018], [x0 - len * 0.5, c + up * 0.55, x0 - len, c + up], [x0 - len * 0.98, c + up * 0.93], [x0 - len * 0.62, c + up * 0.3, x0 - len * 0.6, c + 0.0], [x0 - len * 0.62, c - lo * 0.3, x0 - len * 0.88, c - lo], [x0 - len * 0.86, c - lo * 1.02], [x0 - len * 0.45, c - lo * 0.5, x0, c - 0.016]];
+    if (sp.flukes) parts.push(finGeo(pts.map(p => p.map((v, i) => i % 2 ? (v - c) : v)), th, [X, Z, Y.clone().negate()], new THREE.Vector3(0, c, 0), 1));
+    else parts.push(finGeo(pts, th, [X, Y, Z], new THREE.Vector3(), 1)); }
+  let g = mergeGeometries(parts.map(p => { const q = p.index ? p.toNonIndexed() : p; ['position', 'normal', 'uv', 'part'].forEach(a => { if (!q.attributes[a]) throw new Error('missing ' + a); }); Object.keys(q.attributes).forEach(k => { if (!['position', 'normal', 'uv', 'part'].includes(k)) q.deleteAttribute(k); }); return q; }));
+  g.computeBoundingBox(); const bb = g.boundingBox; const len = bb.max.x - bb.min.x; g.translate(-(bb.max.x + bb.min.x) / 2, 0, 0); g.scale(1 / len, 1 / len, 1 / len);
+  return g;
+}
+const SPECIES = {
+  white: { bodyEnd: 0.9, belly: 0.82, finT: 0.012,
+    prof: [[0, 0, 0, -0.004], [0.015, 0.024, 0.022, -0.004], [0.05, 0.05, 0.046, -0.002], [0.12, 0.08, 0.072, 0], [0.22, 0.098, 0.086, 0], [0.34, 0.104, 0.088, 0], [0.48, 0.092, 0.072, 0], [0.62, 0.068, 0.05, 0], [0.75, 0.042, 0.03, 0], [0.84, 0.024, 0.022, 0], [0.9, 0.02, 0.03, 0]],
+    dorsal: [0.33, 0.47, 0.13, 0.11], d2: [0.79, 0.825, 0.025], pect: [0.24, 0.085, 0.2, 0.55, 0.4], pelv: [0.62, 0.04, 0.05], caudal: [0.2, 0.16, 0.15], col: 0 },
+  whaleshark: { bodyEnd: 0.88, belly: 0.75, finT: 0.012, flatTop: 1,
+    prof: [[0, 0.0, 0.0, 0.0], [0.003, 0.034, 0.07, 0.0], [0.012, 0.05, 0.088, 0.002], [0.06, 0.068, 0.102, 0.006], [0.16, 0.088, 0.105, 0.012], [0.3, 0.1, 0.1, 0.014], [0.45, 0.094, 0.085, 0.01], [0.6, 0.07, 0.06, 0.004], [0.74, 0.042, 0.035, 0], [0.84, 0.026, 0.022, 0], [0.88, 0.022, 0.026, 0]],
+    dorsal: [0.47, 0.6, 0.1, 0.1], d2: [0.79, 0.82, 0.03], pect: [0.24, 0.09, 0.19, 0.5, 0.45], pelv: [0.6, 0.04, 0.05], caudal: [0.24, 0.12, 0.17], col: 1 },
+  bluewhale: { bodyEnd: 0.92, belly: 0.85, finT: 0.008, flukes: true,
+    prof: [[0, 0.004, 0.012, -0.006], [0.02, 0.025, 0.04, -0.006], [0.07, 0.045, 0.058, -0.004], [0.16, 0.06, 0.066, -0.002], [0.3, 0.066, 0.066, 0], [0.45, 0.06, 0.058, 0], [0.6, 0.048, 0.045, 0], [0.74, 0.034, 0.03, 0], [0.86, 0.02, 0.016, 0], [0.92, 0.014, 0.012, 0]],
+    dorsal: [0.74, 0.79, 0.02, 0.04], pect: [0.26, 0.05, 0.14, 0.6, 0.7], caudal: [0.11, 0.11, 0.08], col: 2 },
+};
+const GEOS = {}; for (const k in SPECIES) GEOS[k] = buildAnimal(SPECIES[k]);
+function animalMat(kind) {
+  const m = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55, metalness: 0.0 });
+  m.userData.u = { time: { value: 0 }, amp: { value: 0.035 }, freq: { value: 0.55 }, kind: { value: SPECIES[kind].col }, axisY: { value: SPECIES[kind].flukes ? 1 : 0 }, glow: { value: 0 } };
+  m.onBeforeCompile = sh => { Object.assign(sh.uniforms, m.userData.u);
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', `#include <common>
+      attribute float part; uniform float time, amp, freq, axisY; varying vec2 vUv2; varying float vPart; varying vec3 vObjN; varying vec3 vObjP;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+      float uu = 0.5 - position.x; float env = amp*(0.18 + 1.6*pow(max(uu-0.12,0.)/0.88, 1.7)); float ph = time*freq*6.2831 - uu*5.5;
+      float d = env*sin(ph); if(axisY>0.5) transformed.y += d; else transformed.z += d;
+      vUv2 = uv; vPart = part; vObjN = normal; vObjP = position;`);
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', `#include <common>
+      uniform float kind, glow; varying vec2 vUv2; varying float vPart; varying vec3 vObjN; varying vec3 vObjP;
+      float hsh(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+      float vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f); return mix(mix(hsh(i),hsh(i+vec2(1,0)),f.x), mix(hsh(i+vec2(0,1)),hsh(i+vec2(1,1)),f.x), f.y); }`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+      {
+        float u = vUv2.x; float th = (vUv2.y)*6.2831 - 1.5708; float s = sin(th); float co = cos(th);
+        vec3 topC, botC; float line;
+        if (kind < 0.5) { topC = vec3(0.30,0.34,0.37); botC = vec3(0.86,0.88,0.89); line = -0.18 + 0.07*sin(u*38.) + 0.05*vn(vec2(u*60., th*3.)); }
+        else if (kind < 1.5) { topC = vec3(0.17,0.22,0.29); botC = vec3(0.80,0.83,0.85); line = -0.35; }
+        else { topC = vec3(0.36,0.43,0.52); botC = vec3(0.55,0.62,0.68); line = -0.45; }
+        float sideS = vPart < 0.5 ? s : clamp(vObjN.y*1.2 + (vPart>1.5 ? 0. : 0.6), -1., 1.);
+        float k = smoothstep(line - 0.06, line + 0.06, sideS);
+        vec3 c = mix(botC, topC, k);
+        float mott = vn(vec2(u*90., vUv2.y*70.)); c *= 0.9 + 0.18*mott;
+        if (vPart < 0.5) {
+          if (kind < 0.5) {
+            // gills
+            for (int i=0;i<5;i++){ float gu = 0.205 + float(i)*0.017; float g = smoothstep(0.0035,0.0,abs(u-gu - 0.01*s)) * smoothstep(0.75,0.35,abs(s+0.05)) * smoothstep(0.1,0.4,abs(co)); c = mix(c, vec3(0.08,0.09,0.1), g*0.75); }
+            // eye
+            float e = smoothstep(0.012,0.006, length(vec2((u-0.075)*1.0, (s-0.42)*0.05))); c = mix(c, vec3(0.01), e*step(0.2,abs(co)));
+            // mouth line
+            float mo = smoothstep(0.004,0.0, abs(s + 0.62 - (u-0.03)*1.2)) * step(u,0.13) * step(0.02,u); c = mix(c, vec3(0.12,0.08,0.08), mo*0.8);
+          } else if (kind < 1.5) {
+            // whale shark spots + stripes on the back
+            vec2 g = vec2(u*70., vUv2.y*44.); vec2 cell = floor(g); vec2 f = fract(g) - 0.5; vec2 jit = vec2(hsh(cell), hsh(cell+7.3)) - 0.5; float r = 0.21 + 0.08*hsh(cell+3.1);
+            float spot = smoothstep(r, r-0.08, length(f - jit*0.45)) * smoothstep(-0.25, 0.2, s);
+            float stripe = smoothstep(0.08, 0.0, abs(fract(u*48.) - 0.5) - 0.42) * smoothstep(0.0,0.3,s) * step(0.12,u);
+            c = mix(c, vec3(0.88,0.9,0.9), max(spot*0.85, stripe*0.5));
+            float e = smoothstep(0.012,0.006, length(vec2((u-0.03), (s+0.05)*0.03))); c = mix(c, vec3(0.01), e*step(0.6,abs(co)));
+            float mo = smoothstep(0.012,0.0, u) ; c = mix(c, vec3(0.05), mo);
+          } else {
+            // blue whale: throat grooves + mottling
+            float gr = smoothstep(0.35, 0.0, abs(fract(th*26.) - 0.5)) * smoothstep(-0.2,-0.6,s) * step(u,0.42);
+            c = mix(c, c*0.7, gr*0.6);
+            c = mix(c, c*1.25, smoothstep(0.55,0.8,vn(vec2(u*30., vUv2.y*20.)))*0.5);
+          }
+        } else if (kind < 0.5 && vPart > 1.5) {
+          // pectoral tips dark underneath
+          c = mix(c, vec3(0.12), smoothstep(0.92,1.0, length(vObjP.xz*vec2(1.,1.)) * 0.) );
+        }
+        diffuseColor.rgb = c;
+      }`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+      totalEmissiveRadiance += vec3(0.25,0.9,1.0)*glow*0.5;`);
+  };
+  return m;
+}
+function makeAnimal(kind) { const m = new THREE.Mesh(GEOS[kind], animalMat(kind)); m.userData.kind = kind; return m; }
+
+// ---------- diver (Mixamo Xbot as wetsuit diver) ----------
+const gltf = await new GLTFLoader().loadAsync('assets/Xbot.glb');
+const diver = gltf.scene; const DB = n => diver.getObjectByName('mixamorig' + n);
+diver.traverse(o => { if (o.isMesh || o.isSkinnedMesh) { o.material = new THREE.MeshStandardMaterial({ color: 0x15181c, roughness: 0.6 }); o.frustumCulled = false; } });
+{ const bb = new THREE.Box3().setFromObject(diver); const h = bb.max.y - bb.min.y; diver.scale.setScalar(1.78 / h); }
+const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.62, 20), new THREE.MeshStandardMaterial({ color: 0xf2c200, roughness: 0.35, metalness: 0.3 }));
+const spine = DB('Spine2'); spine.add(tank); { const s = 1 / diver.scale.x; tank.scale.setScalar(s); tank.position.set(0, 0.0 * s, -0.2 * s); }
+const finMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 0.5 });
+for (const side of ['Left', 'Right']) { const foot = DB(side + 'Foot'); const f = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.02, 0.6), finMat); const s = 1 / diver.scale.x; f.scale.setScalar(s); f.position.set(0, -0.05 * s, 0.32 * s); foot.add(f); }
+const diverRig = new THREE.Group(); diverRig.add(diver); diver.rotation.set(Math.PI / 2, 0, -Math.PI / 2); // head +x, belly down
+const diverHolder = new THREE.Group(); diverHolder.add(diverRig);
+const BN = { la: DB('LeftArm'), ra: DB('RightArm'), lf: DB('LeftForeArm'), rf: DB('RightForeArm'), lul: DB('LeftUpLeg'), rul: DB('RightUpLeg'), lleg: DB('LeftLeg'), rleg: DB('RightLeg'), head: DB('Head'), neck: DB('Neck') };
+const R0 = {}; for (const k in BN) R0[k] = BN[k].quaternion.clone();
+function poseDiver(t) {
+  const q = (k, x, y, z) => { BN[k].quaternion.copy(R0[k]).multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, z))); };
+  q('la', 0, 0, 1.25); q('ra', 0, 0, -1.25); q('lf', 0, 0.0, 0.25); q('rf', 0, 0, -0.25);
+  const k = Math.sin(t * 4.2) * 0.32; q('lul', k, 0, 0); q('rul', -k, 0, 0); q('lleg', 0.25 + 0.15 * Math.sin(t * 4.2 - 1), 0, 0); q('rleg', 0.25 + 0.15 * Math.sin(t * 4.2 + 2), 0, 0);
+  q('neck', -0.5, 0, 0); q('head', -0.35, 0, 0);
+}
+sea.add(diverHolder);
+
+// ---------- hologram school bus (12 m) ----------
+const bus = new THREE.Group(); { const L = 12, Hh = 3.2, Wd2 = 2.5; const box = new THREE.BoxGeometry(L, Hh, Wd2);
+  const fill = new THREE.Mesh(box, new THREE.MeshBasicMaterial({ color: 0xffc400, transparent: true, opacity: 0.18, depthWrite: false, fog: false })); bus.add(fill);
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: 0xffd84a, fog: false })); bus.add(edges);
+  for (let i = 0; i < 9; i++) { const w = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(0.95, 0.9)), new THREE.LineBasicMaterial({ color: 0xffd84a, fog: false })); w.position.set(-L / 2 + 1.6 + i * 1.12, 0.65, Wd2 / 2 + 0.01); bus.add(w); }
+  for (const x of [-3.6, 3.8]) { const wh = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.CircleGeometry(0.55, 20)), new THREE.LineBasicMaterial({ color: 0xffd84a, fog: false })); wh.position.set(x, -Hh / 2, Wd2 / 2 + 0.01); bus.add(wh); } }
+sea.add(bus);
+
+// ---------- fishing boat (8 m) ----------
+const boat = new THREE.Group(); { const L = 8, B = 2.6, D = 1.3; const g = new THREE.BoxGeometry(L, D, B, 16, 4, 6); const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) { let x = p.getX(i), y = p.getY(i), z = p.getZ(i); const f = clamp((x / (L / 2) - 0.25) / 0.75); z *= 1 - f * f * 0.95; const bot = (y < 0) ? 1 : 0; y += bot * f * 0.5; z *= y < 0 ? 0.75 + 0.25 * (y + D / 2) / (D / 2) * 0 + 0.25 : 1; p.setXYZ(i, x, y, z); }
+  g.computeVertexNormals(); const hull = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0x2b2f35, roughness: 0.8 })); boat.add(hull);
+  const motor = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.4, 0.35), new THREE.MeshStandardMaterial({ color: 0x15171a })); motor.position.set(-L / 2 - 0.15, -0.6, 0); boat.add(motor); }
+sea.add(boat);
+
+const A = { gw: makeAnimal('white'), gw2: makeAnimal('white'), ws: makeAnimal('whaleshark'), bw: makeAnimal('bluewhale') };
+Object.values(A).forEach(a => sea.add(a));
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(W, H, { type: THREE.HalfFloatType, samples: 4 }));
+composer.addPass(new RenderPass(sea, cam)); const bloom = new UnrealBloomPass(new THREE.Vector2(W, H), 0.25, 0.6, 0.9); composer.addPass(bloom); composer.addPass(new OutputPass());
+
+function worldToScreen(v) { const p = v.clone().project(cam); return { x: (p.x * 0.5 + 0.5) * W, y: (-p.y * 0.5 + 0.5) * H, vis: p.z < 1 }; }
+function placeAnimal(a, len, x, y, z, ry = 0, tt = 0, amp = 0.035, freq = 0.55, vis = true) { a.visible = vis; a.scale.setScalar(len); a.position.set(x, y, z); a.rotation.set(0, ry, 0); const u = a.material.userData.u; u.time.value = tt; u.amp.value = amp; u.freq.value = freq; }
+function hideAll() { Object.values(A).forEach(a => a.visible = false); diverHolder.visible = false; bus.visible = false; boat.visible = false; surf.visible = false; }
+function updRays(t, center, spread = 30, top = 22, len = 60, op = 0.12) { rays.forEach((m, i) => { const r = rng(i * 13 + 1); const x = center.x + (r() - 0.5) * spread * 2 + Math.sin(t * 0.25 + i) * 2; const z = center.z + (r() - 0.6) * spread; const w = 2 + r() * 5; m.scale.set(w, len, 1); m.position.set(x, top - len / 2, z); m.rotation.set(0, Math.atan2(cam.position.x - x, cam.position.z - z), 0.18 + (r() - 0.5) * 0.1); m.material.opacity = op * (0.6 + 0.4 * Math.sin(t * 0.6 + i * 2.1)); }); }
+function snowAt(t, c) { snow.position.set(c.x - ((t * 0.6) % 4), c.y + ((t * 0.15) % 2), c.z); }
+
+// =====================================================================
+//  SCENES (time ranges)
+// =====================================================================
+const T = {
+  hookTwice: Wd('hook', 'twice'), sizeStart: ST.size, gwWord: Wd('size', 'great'), grow: Wd('size', 'thirteen'), busW: Wd('size', 'school'), tons: Wd('size', 'twenty', 1),
+  whale: ST.whale, largest: Wd('whale', 'largest'), blue: Wd('whale', 'blue'), boat: Wd('beaches', 'small'), rammed: Wd('beaches', 'rammed'), mapIn: Wd('collapse', 'so') - 0.15,
+};
+function scene3D(t) {
+  if (t >= ST.size && t < ST.hunger) return 'lineup';
+  if (t >= T.boat && t < ST.crash) return 'boat';
+  if (t >= ST.coast && t < ST.bites) return 'swim';
+  if (t >= ST.cta) return 'cta';
+  return null;
+}
+function renderSea(t, mode) {
+  hideAll(); surf.material.uniforms.time.value = t; sea.fog.density = 0.01; dome.material.uniforms.sunUp.value = 1;
+  if (mode === 'lineup') {
+    // phase A: diver + normal great white, then growth; phase B: full lineup
+    const g = ease((t - T.grow) / 1.1); const len = lerp(4.5, 13.5, g);
+    const pb = ease((t - (ST.whale - 0.2)) / 2.2); // pull back to lineup
+    // camera
+    const camD = lerp(lerp(12.5, 34, ease((t - T.grow - 0.7) / 1.4)), 100, pb); const camX = lerp(lerp(0.3, 1.6, g), 0, pb), camY = lerp(lerp(0.8, 1.8, g), 5, pb);
+    cam.fov = 42; cam.position.set(camX + Math.sin(t * 0.3) * 0.2, camY + Math.sin(t * 0.4) * 0.15, camD); cam.lookAt(camX, camY - 0.4 * (1 - pb), 0); cam.updateProjectionMatrix();
+    sea.fog.density = lerp(0.012, 0.0045, Math.max(g * 0.6, pb));
+    // great white: align its tail with lineup in phase B
+    const gwY = lerp(0, -6, pb), gwX = lerp(0, -18 + 13.5 / 2, pb);
+    placeAnimal(A.gw, len, gwX + lerp(Math.min(0, (t - ST.size - 2.5) * 2.5), 0, clamp((t - ST.size) / 2.6)) * (1 - pb), gwY, 0, 0, t, 0.035 * (1 - 0.4 * g), 0.55 - 0.25 * g);
+    // diver
+    diverHolder.visible = true; poseDiver(t); const dvY = lerp(lerp(2.6, 9.0, g), -25, pb), dvX = lerp(lerp(0.6, 2.0, g), -18 + 0.9, pb); diverHolder.position.set(dvX, dvY, lerp(1.4, 0, pb)); diverHolder.scale.setScalar(1);
+    // bus
+    const ba = ss(T.busW - 0.2, T.busW + 0.4, t); bus.visible = ba > 0.01; bus.position.set(lerp(-0.6, -18 + 6, pb), lerp(-7.2, -17, pb), lerp(-1, 0, pb)); bus.children.forEach(c => { c.material.opacity = c.type === 'Mesh' ? 0.18 * ba : ba; c.material.transparent = true; });
+    // whale shark + blue whale
+    const wa = ss(ST.whale - 0.1, ST.whale + 1.2, t);
+    if (wa > 0) { placeAnimal(A.ws, 36, -18 + 18 + lerp(30, 0, easeOut((t - ST.whale + 0.1) / 1.8)), 27, -2, 0, t, 0.02, 0.18);
+      const ba2 = ss(T.blue - 0.5, T.blue + 0.7, t); if (ba2 > 0) placeAnimal(A.bw, 30, -18 + 15 + lerp(-40, 0, easeOut((t - T.blue + 0.5) / 1.6)), 11, -2, 0, t, 0.018, 0.16); }
+    snowAt(t, cam.position); updRays(t, new THREE.Vector3(cam.position.x, 0, 0), 30 + pb * 40, 40, 90, 0.11);
+    surf.visible = false; bloom.strength = 0.2;
+  } else if (mode === 'boat') {
+    const k = t - T.boat; surf.visible = true; surf.position.y = 0;
+    cam.fov = 50; const shake = Math.max(0, 1 - Math.abs(t - T.rammed - 0.1) * 3) * 0.35; cam.position.set(-1 + k * 0.4 + Math.sin(t * 37) * shake, -15 + Math.sin(t * 29) * shake, 30); cam.lookAt(0.5 + k * 0.3, -2.5, 0); cam.updateProjectionMatrix(); sea.fog.density = 0.012;
+    boat.visible = true; const hit = Math.max(0, t - T.rammed); boat.position.set(0.5, -0.35 + Math.sin(t * 1.3) * 0.08 + Math.exp(-hit * 4) * (hit > 0 ? 0.6 : 0), 0); boat.rotation.set(Math.sin(t * 0.9) * 0.03 + (hit > 0 ? Math.exp(-hit * 3) * 0.25 * Math.sin(hit * 18) : 0), 0.3, Math.sin(t * 1.1) * 0.03);
+    placeAnimal(A.gw, 13.5, lerp(-19, 4, (t - T.boat + 0.6) / 2.9), lerp(-8.5, -3.4, ss(T.boat, T.rammed + 0.2, t)), -2, 0.15, t, 0.03, 0.35);
+    A.gw.rotation.z = lerp(-0.05, 0.22, ss(T.boat + 0.5, T.rammed, t));
+    snowAt(t, cam.position); updRays(t, new THREE.Vector3(0, 0, -5), 25, 0, 50, 0.16); bloom.strength = 0.35;
+  } else if (mode === 'swim') {
+    const k = t - ST.coast; surf.visible = true; surf.position.y = 0; sea.fog.density = 0.014;
+    cam.fov = 48; cam.position.set(-2 + k * 0.3, -11, 22); cam.lookAt(0.5 + k * 0.2, -2.5, 0); cam.updateProjectionMatrix();
+    diverHolder.visible = true; poseDiver(t * 0.8); diverHolder.position.set(1.5, -0.55, 0); diverHolder.rotation.set(0, 0.4, 0);
+    placeAnimal(A.gw, 13.5, lerp(-24, 10, k / 5.2), lerp(-9, -6.5, k / 5.2), -3, 0.12, t, 0.03, 0.35);
+    placeAnimal(A.gw2, 13.5, lerp(26, -6, k / 5.2), -12, -14, Math.PI - 0.1, t + 1.3, 0.03, 0.33); A.gw2.material.userData.u.amp.value = 0.03;
+    snowAt(t, cam.position); updRays(t, new THREE.Vector3(0, 0, -5), 25, 0, 50, 0.16); bloom.strength = 0.35;
+  } else if (mode === 'cta') {
+    const k = t - ST.cta; cam.fov = 40; sea.fog.density = 0.011; cam.position.set(0, 0.5 + Math.sin(t * 0.4) * 0.1, 6); cam.lookAt(0, 0.2, -10); cam.updateProjectionMatrix();
+    // giant white approaches and turns past camera
+    const u = clamp(k / 5.2); const px = q => lerp(-16, 7, q), pz = q => lerp(-44, -11, q); const x = px(u), z = pz(u); placeAnimal(A.gw, 13.5, x, lerp(-3.5, -1.0, u), z, Math.atan2(-(pz(u + 0.01) - z), px(u + 0.01) - x), t, 0.03, 0.35);
+    diverHolder.visible = true; poseDiver(t); diverHolder.position.set(-2.0, -2.6, -9); diverHolder.rotation.y = 0.6;
+    snowAt(t, cam.position); updRays(t, new THREE.Vector3(0, 0, -15), 20, 20, 60, 0.13); bloom.strength = 0.25;
+  }
+  composer.render();
+  ctx.drawImage(renderer.domElement, 0, 0);
+}
+
+// =====================================================================
+//  FOOTAGE
+// =====================================================================
+const footCache = new Map();
+async function drawFootage(sh, t) {
+  const n = Math.max(0, Math.min(sh.n - 1, Math.floor((t - sh.t0) * FPS + 1e-4)));
+  const src = `foot/${sh.id}/${String(n + 1).padStart(5, '0')}.jpg`;
+  let im = footCache.get(src); if (im === undefined) { im = await loadImg(src); footCache.clear(); footCache.set(src, im); }
+  if (!im) { const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#0c4a6e'); g.addColorStop(1, '#021019'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); txt('FOOTAGE: ' + sh.key, W / 2, H / 2, 40, '#fff', 'center'); return; }
+  const z = lerp(sh.z0 || 1, sh.z1 || 1.08, clamp((t - sh.t0) / (sh.t1 - sh.t0)));
+  const cx = W / 2 + (sh.px || 0) * W, cy = H / 2 + (sh.py || 0) * H; ctx.drawImage(im, cx - W * z / 2, cy - H * z / 2, W * z, H * z);
+  if (sh.dim) { ctx.fillStyle = `rgba(0,8,16,${sh.dim})`; ctx.fillRect(0, 0, W, H); }
+}
+const shotAt = t => SHOTS.find(s => t >= s.t0 && t < s.t1);
+
+// =====================================================================
+//  FLAT WORLD MAP
+// =====================================================================
+const MAPY0 = 330, MAPY1 = 1330; // viewport band
+const MK = [ // [t, lonC, latC, zoom]
+  [T.mapIn, 6, 5, 1.0], [Wd('food', 'great') - 0.3, 6, 2, 1.13], [Wd('food', 'tiger') - 0.2, 6, 0, 1.13], [Wd('food', 'humpback') + 0.4, 175, -5, 1.55], [ST.cold - 0.1, 175, -5, 1.55], [ST.cold + 0.9, 0, 15, 1.22],
+  [Wd('cold', 'sharks') - 0.1, 0, 15, 1.22], [Wd('cold', 'north') + 0.3, -65, 42, 1.7], [ST.rivers - 0.4, -65, 42, 1.7], [ST.rivers + 1.0, -90, 34, 6.2], [ST.coast, -90, 35, 6.6]];
+function mapCam(t) { let i = 0; while (i < MK.length - 2 && t > MK[i + 1][0]) i++; const a = MK[i], b = MK[i + 1]; const f = ease((t - a[0]) / (b[0] - a[0])); let dl = b[1] - a[1]; if (dl > 180) dl -= 360; if (dl < -180) dl += 360; const za = Math.log(a[3]), zb = Math.log(b[3]); return { lon: a[1] + dl * f, lat: lerp(a[2], b[2], f), z: Math.exp(lerp(za, zb, f)) }; }
+let MC = { lon: 0, lat: 0, z: 1 };
+const PPD = () => 3 * MC.z; // pixels per degree
+function ll2xy(lat, lon) { const p = PPD(); let dl = lon - MC.lon; while (dl > 180) dl -= 360; while (dl < -180) dl += 360; return { x: W / 2 + dl * p, y: (MAPY0 + MAPY1) / 2 - (lat - MC.lat) * p }; }
+function drawMapBase(t) {
+  ctx.fillStyle = '#020a12'; ctx.fillRect(0, 0, W, H);
+  const p = PPD(); const sx = MAPIMG.width / 360, sy = MAPIMG.height / 180;
+  ctx.save(); ctx.beginPath(); ctx.rect(0, MAPY0, W, MAPY1 - MAPY0); ctx.clip();
+  for (const off of [-360, 0, 360]) { const lonL = MC.lon - (W / 2) / p + off, latT = MC.lat + ((MAPY1 - MAPY0) / 2) / p; const x0 = (lonL + 180) * sx, y0 = (90 - latT) * sy, w = (W / p) * sx, h = ((MAPY1 - MAPY0) / p) * sy;
+    // clip source to image
+    const cx0 = Math.max(0, x0), cy0 = Math.max(0, y0), cx1 = Math.min(MAPIMG.width, x0 + w), cy1 = Math.min(MAPIMG.height, y0 + h); if (cx1 <= cx0 || cy1 <= cy0) continue;
+    const dx = (cx0 - x0) / sx * p, dy = MAPY0 + (cy0 - y0) / sy * p; ctx.drawImage(MAPIMG, cx0, cy0, cx1 - cx0, cy1 - cy0, dx, dy, (cx1 - cx0) / sx * p, (cy1 - cy0) / sy * p); }
+  // grade: darken slightly
+  ctx.fillStyle = 'rgba(0,10,25,0.22)'; ctx.fillRect(0, MAPY0, W, MAPY1 - MAPY0);
+  // graticule
+  ctx.strokeStyle = 'rgba(160,220,255,0.10)'; ctx.lineWidth = 1.5; const step = MC.z > 4 ? 5 : 30;
+  for (let la = -90; la <= 90; la += step) { const y = ll2xy(la, MC.lon).y; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  for (let lo = -180; lo < 180; lo += step) { const x = ll2xy(0, lo).x; ctx.beginPath(); ctx.moveTo(x, MAPY0); ctx.lineTo(x, MAPY1); ctx.stroke(); }
+  ctx.restore();
+  // fade edges
+  const g1 = ctx.createLinearGradient(0, MAPY0, 0, MAPY0 + 90); g1.addColorStop(0, 'rgba(2,10,18,1)'); g1.addColorStop(1, 'rgba(2,10,18,0)'); ctx.fillStyle = g1; ctx.fillRect(0, MAPY0, W, 90);
+  const g2 = ctx.createLinearGradient(0, MAPY1 - 90, 0, MAPY1); g2.addColorStop(0, 'rgba(2,10,18,0)'); g2.addColorStop(1, 'rgba(2,10,18,1)'); ctx.fillStyle = g2; ctx.fillRect(0, MAPY1 - 90, W, 90);
+}
+function oceanFill(color, latS, latN, a) { // tint ocean between latitudes
+  if (a <= 0) return; tctx.clearRect(0, 0, W, H); tctx.save(); tctx.beginPath(); tctx.rect(0, MAPY0, W, MAPY1 - MAPY0); tctx.clip();
+  const yN = ll2xy(latN, MC.lon).y, yS = ll2xy(latS, MC.lon).y; tctx.fillStyle = color; tctx.fillRect(0, yN, W, yS - yN);
+  tctx.globalCompositeOperation = 'destination-in'; const p = PPD(); const sx = 2048 / 360, sy = 1024 / 180;
+  for (const off of [-360, 0, 360]) { const lonL = MC.lon - (W / 2) / p + off, latT = MC.lat + ((MAPY1 - MAPY0) / 2) / p; tctx.drawImage(OCEAN, (lonL + 180) * sx, (90 - latT) * sy, (W / p) * sx, ((MAPY1 - MAPY0) / p) * sy, 0, MAPY0, W, MAPY1 - MAPY0); }
+  tctx.restore(); ctx.save(); ctx.globalAlpha = a; ctx.drawImage(tmp, 0, 0); ctx.restore();
+  // edge lines
+  ctx.save(); ctx.globalAlpha = a; ctx.setLineDash([16, 10]); ctx.strokeStyle = color.replace(/[\d.]+\)$/, '1)'); ctx.lineWidth = 3; for (const la of [latN, latS]) { const y = ll2xy(la, MC.lon).y; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); } ctx.restore();
+}
+function hotspot(lat, lon, t, t0, col = '#ff3b3b', label = null, side = 1, r = 26) {
+  const a = ss(t0 - 0.1, t0 + 0.3, t); if (a <= 0) return; const p = ll2xy(lat, lon); if (p.x < -50 || p.x > W + 50) return;
+  ctx.save(); ctx.globalAlpha = a; const pul = (t * 1.3 + lon * 0.01) % 1;
+  const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 2.4); g.addColorStop(0, col); g.addColorStop(1, 'rgba(0,0,0,0)'); ctx.fillStyle = g; ctx.globalAlpha = a * 0.7; ctx.beginPath(); ctx.arc(p.x, p.y, r * 2.4, 0, 7); ctx.fill();
+  ctx.globalAlpha = a * (1 - pul); ctx.strokeStyle = col; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(p.x, p.y, r * (0.6 + pul * 1.8), 0, 7); ctx.stroke();
+  ctx.globalAlpha = a; ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, 7); ctx.fill(); ctx.restore();
+  if (label) { const s = pop(t, t0); ctx.save(); ctx.globalAlpha = a; ctx.translate(p.x, p.y); ctx.scale(s, s); if (side === 0) badge(label, 0, -62, 26, 'rgba(10,14,20,0.88)', '#fff', 1, 'center', 16, 46); else if (side === 2) badge(label, 0, 62, 26, 'rgba(10,14,20,0.88)', '#fff', 1, 'center', 16, 46); else badge(label, side * 24, -46, 26, 'rgba(10,14,20,0.88)', '#fff', 1, side > 0 ? 'left' : 'right', 16, 46); ctx.restore(); }
+}
+function gcPts(a, b, n = 40, bend = 0.18) { const P = []; const A0 = ll2xy(...a), B0 = ll2xy(...b); const mx = (A0.x + B0.x) / 2, my = (A0.y + B0.y) / 2; const dx = B0.x - A0.x, dy = B0.y - A0.y; const cx = mx - dy * bend, cy = my + dx * bend;
+  for (let i = 0; i <= n; i++) { const u = i / n; P.push({ x: (1 - u) * (1 - u) * A0.x + 2 * (1 - u) * u * cx + u * u * B0.x, y: (1 - u) * (1 - u) * A0.y + 2 * (1 - u) * u * cy + u * u * B0.y }); } return P; }
+function arrow(a, b, t, t0, dur, col, w = 9, bend = 0.18, dash = false, icon = 'shark') {
+  const prog = easeOut((t - t0) / dur); if (prog <= 0) return; const P = gcPts(a, b, 50, bend); const k = Math.max(1, Math.floor(prog * (P.length - 1)));
+  ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = w + 6; if (dash) ctx.setLineDash([2, w * 2.2]); ctx.beginPath(); P.slice(0, k + 1).forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke();
+  ctx.strokeStyle = col; ctx.lineWidth = w; ctx.stroke(); ctx.setLineDash([]);
+  const h = P[k], pv = P[k - 1]; const ang = Math.atan2(h.y - pv.y, h.x - pv.x);
+  if (icon === 'shark') { ctx.translate(h.x, h.y); ctx.rotate(Math.abs(ang) > Math.PI / 2 ? ang + Math.PI : ang); sharkIcon(0, 0, 70, '#fff', Math.abs(ang) > Math.PI / 2 ? -1 : 1, 1); }
+  else if (icon === 'whale') { ctx.translate(h.x, h.y); ctx.fillStyle = '#cfe9ff'; ctx.beginPath(); ctx.ellipse(0, 0, 22, 10, ang, 0, 7); ctx.fill(); }
+  else { ctx.translate(h.x, h.y); ctx.rotate(ang); ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(18, 0); ctx.lineTo(-12, 13); ctx.lineTo(-12, -13); ctx.closePath(); ctx.fill(); }
+  ctx.restore();
+}
+// Mississippi from the Gulf to Alton, Illinois (Natural Earth centerline)
+let MISS = []; try { MISS = await (await fetch('mississippi.json')).json(); } catch (e) { }
+function drawMap(t) {
+  MC = mapCam(t); drawMapBase(t);
+  const tf = Wd('food', 'great');
+  // seal colonies
+  hotspot(-34.14, 18.58, t, Wd('food', 'south'), RED, 'SOUTH AFRICA', 2);
+  hotspot(37.7, -123.0, t, Wd('food', 'california'), RED, 'CALIFORNIA', 1);
+  hotspot(-35.33, 136.1, t, Wd('food', 'australia'), RED, 'AUSTRALIA', -1);
+  if (t > tf - 0.2 && t < ST.cold + 0.8) { const a = win(t, tf, ST.cold + 0.6, 0.4, 0.6); ctx.save(); ctx.globalAlpha = a; badge('SEAL COLONIES', W / 2, MAPY0 + 70, 34, 'rgba(255,59,59,0.95)', '#fff', 1); ctx.restore(); }
+  // humpback routes + tiger sharks
+  const th = Wd('food', 'humpback'); const routes = [[[58, -147], [20.8, -156.5], -0.2], [[-62, 100], [-15.5, 123.5], 0.15], [[-62, 160], [-25, 153], 0.12], [[-63, -172], [-20, -175], 0.1]];
+  if (t < ST.cold + 0.8) routes.forEach((r, i) => { const a = 1 - ss(ST.cold + 0.2, ST.cold + 0.8, t); ctx.save(); ctx.globalAlpha = a; arrow(r[0], r[1], t, th - 0.3 + i * 0.12, 1.8, 'rgba(200,235,255,0.95)', 6, r[2], true, 'whale'); arrow(r[0], r[1], t, th + 0.35 + i * 0.12, 2.0, ORG, 7, r[2] * 1.0, false, 'shark'); ctx.restore(); });
+  if (t > th - 0.2 && t < ST.cold + 0.6) { const a = win(t, th, ST.cold + 0.5, 0.4, 0.5); ctx.save(); ctx.globalAlpha = a; badge('TIGER SHARKS FOLLOW HUMPBACK CALVES', W / 2, MAPY1 - 70, 28, 'rgba(255,154,31,0.95)', '#111', 1); ctx.restore(); }
+  // range expansion (cold)
+  const r0 = ST.cold; if (t > r0 && t < ST.rivers + 0.6) { const a = win(t, r0 + 0.5, ST.rivers + 0.4, 0.8, 0.6); const g = ease((t - Wd('cold', 'push')) / 2.0); const latN = lerp(42, 72, g), latS = lerp(-40, -58, g);
+    oceanFill('rgba(255,70,60,0.33)', latS, latN, a);
+    ctx.save(); ctx.globalAlpha = a; badge(g > 0.05 ? 'BIG-SHARK RANGE: EXPANDING' : 'BIG-SHARK RANGE TODAY', W / 2, MAPY0 + 70, 30, 'rgba(255,59,59,0.95)', '#fff', 1);
+    // thermometer chip
+    const hb = Wd('cold', 'big'); if (t > hb) { badge('BIG BODY = HOLDS HEAT', W / 2, MAPY1 - 70, 28, 'rgba(255,212,0,0.95)', '#111', ss(hb, hb + 0.3, t)); } ctx.restore();
+    const pn = Wd('cold', 'north', 1); arrow([38, -40], [56, 3], t, pn - 0.3, 1.2, RED, 9, 0.15); arrow([42, -20], [67, 8], t, Wd('cold', 'norway') - 0.3, 1.1, RED, 9, -0.1); arrow([35, -135], [58.5, -147], t, Wd('cold', 'alaska') - 0.4, 1.0, RED, 9, -0.15);
+    hotspot(56, 3, t, pn + 0.4, RED, 'NORTH SEA', -1, 20); hotspot(67, 8, t, Wd('cold', 'norway') + 0.4, RED, 'NORWAY', 0, 20); hotspot(58.5, -147, t, Wd('cold', 'alaska') + 0.3, RED, 'ALASKA', 1, 20); }
+  // Mississippi
+  if (t > ST.rivers - 0.2 && MISS.length) { const a = ss(ST.rivers + 0.4, ST.rivers + 0.9, t); const prog = easeOut((t - Wd('rivers', 'caught')) / 2.2);
+    const n = Math.max(2, Math.floor(prog * MISS.length)); ctx.save(); ctx.globalAlpha = a; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(120,220,255,0.35)'; ctx.lineWidth = 5; ctx.beginPath(); MISS.forEach(([lo, la], i) => { const p = ll2xy(la, lo); i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); }); ctx.stroke();
+    if (prog > 0) { ctx.strokeStyle = '#3fe0ff'; ctx.lineWidth = 9; ctx.beginPath(); MISS.slice(0, n).forEach(([lo, la], i) => { const p = ll2xy(la, lo); i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); }); ctx.stroke();
+      const h = ll2xy(MISS[n - 1][1], MISS[n - 1][0]); sharkIcon(h.x, h.y - 6, 80, '#fff', 1, 1); }
+    ctx.restore();
+    hotspot(28.98, -89.38, t, ST.rivers + 0.8, TEAL, 'GULF OF MEXICO', 1, 18);
+    hotspot(38.89, -90.18, t, Wd('rivers', 'mississippi'), YEL, 'ALTON, ILLINOIS', 1, 18);
+    if (t > Wd('rivers', 'thousand')) { ctx.save(); const s = pop(t, Wd('rivers', 'thousand')); ctx.translate(W / 2, MAPY0 + 80); ctx.scale(s, s); badge('1,000+ MILES INLAND', 0, 0, 40, 'rgba(255,212,0,0.96)', '#111', 1); ctx.restore(); }
+    // size inset: bull shark 2.4 m vs 7.2 m
+    const ip = Wd('rivers', 'picture'); if (t > ip - 0.2) { const ia = ss(ip - 0.2, ip + 0.2, t); panelBox(60, 840, 960, 470, ia); ctx.save(); ctx.globalAlpha = ia;
+      txt('BULL SHARK', 100, 890, 32, '#fff', 'left', 900, 0); const g = ease((t - Wd('rivers', 'seven')) / 0.8); const px = 100; // px per meter
+      sharkIcon(110 + 2.4 * px / 2, 975, 2.4 * px, 'rgba(170,190,205,0.95)', 1, 1); txt('TODAY · 2.4 m', 380, 975, 30, '#cfe3ee', 'left', 900, 0);
+      if (g > 0) { sharkIcon(110 + 7.2 * px * g / 2, 1185, 7.2 * px * g, RED, 1, 0.95); txt('3× · 7.2 m', 1000, 1065, 36, RED, 'right', 900, 0); } ctx.restore(); } }
+}
+
+// =====================================================================
+//  CHARTS & PANELS
+// =====================================================================
+function countPanel(t) {
+  const t0 = ST.count, a = win(t, t0 + 0.1, ST.size, 0.4, 0.4); if (a <= 0) return;
+  panelBox(60, 420, 960, 820, a); ctx.save(); ctx.globalAlpha = a;
+  const k1 = Wd('count', 'hundred'), k2 = Wd('count', 'seven'), k3 = Wd('count', 'one'), k4 = Wd('count', 'three');
+  txt('SHARKS KILLED BY HUMANS / YEAR', 540, 485, 34, '#cfe3ee', 'center', 900, 0);
+  const v = 100e6 * easeOut((t - k1 + 0.2) / 0.9); txt('~' + fmt(v), 540, 565, 82, t > k1 - 0.2 ? '#fff' : 'rgba(255,255,255,0.15)', 'center', 900, 0);
+  if (t > k2) { const s = pop(t, k2); ctx.save(); ctx.translate(540, 650); ctx.scale(s, s); badge('≈ 7% OF ALL SHARKS', 0, 0, 34, 'rgba(255,59,59,0.95)', '#fff'); ctx.restore(); }
+  // icon grid: each icon = 100 million
+  txt('SHARKS ON EARTH', 540, 740, 34, '#cfe3ee', 'center', 900, 0);
+  const n1 = t > k3 ? 14 : 0, n2 = t > k4 ? 14 : 0; const val = t < k4 ? 1.4 : (t < k4 ? 1.4 : lerp(1.4, 2.8, easeOut((t - k4) / 0.8)));
+  if (t > k3 - 0.2) txt(val.toFixed(1) + ' BILLION', 540, 815, 76, t > k4 ? TEAL : '#fff', 'center', 900, 0);
+  for (let i = 0; i < 28; i++) { const row = Math.floor(i / 7), col = i % 7; const x = 150 + col * 130, y = 905 + row * 78; const born = i < 14 ? k3 + i * 0.04 : k4 + (i - 14) * 0.05; const al = ss(born, born + 0.15, t);
+    sharkIcon(x, y, 105, i < 14 ? 'rgba(200,215,225,0.95)' : TEAL, 1, al * 1.0 + (1 - al) * 0.07); }
+  txt('EACH ICON = 100 MILLION SHARKS', 540, 1205, 22, '#8fb3c4', 'center', 800, 0);
+  ctx.restore();
+}
+function hungerPanel(t) {
+  const a = win(t, ST.hunger + 0.3, ST.collapse, 0.4, 0.4); if (a <= 0) return;
+  panelBox(60, 760, 960, 520, a); ctx.save(); ctx.globalAlpha = a;
+  txt('FOOD THE SHARKS NEED', 100, 815, 34, '#fff', 'left', 900, 0); txt('vs. TODAY', 980, 815, 26, '#9fbccb', 'right', 800, 0);
+  const k1 = Wd('hunger', 'twelve'), k2 = Wd('hunger', 'twice'), k3 = Wd('hunger', 'twenty'), k4 = Wd('hunger', 'can');
+  const bx = 330, bw = 600 / 24; // px per x
+  const bar = (y, lab, v, col, t0) => { const g = easeOut((t - t0) / 0.7); txt(lab, 100, y, 26, '#dfe9ef', 'left', 800, 0); rr(bx, y - 22, Math.max(6, bw * v * g), 44, 8); ctx.fillStyle = col; ctx.fill(); if (g > 0.05) txt('×' + Math.round(v * g + (v === 1 ? 0 : 0.0)), bx + bw * v * g + 14, y, 34, '#fff', 'left', 900, 0); };
+  bar(900, 'TODAY', 1, '#7f97a6', ST.hunger + 0.3); bar(980, 'PER SHARK', 12, ORG, k1 - 0.2); bar(1060, '× 2 SHARKS', 12, ORG, k2 - 0.1);
+    bar(1150, 'TOTAL', 24, RED, k3 - 0.2);
+  // ocean capacity line
+  const cx = bx + bw * 1.6; ctx.setLineDash([10, 8]); ctx.strokeStyle = TEAL; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(cx, 860); ctx.lineTo(cx, 1190); ctx.stroke(); ctx.setLineDash([]);
+  txt('WHAT THE OCEAN', cx + 10, 1222, 20, TEAL, 'left', 900, 0); txt('CAN SUPPLY', cx + 10, 1246, 20, TEAL, 'left', 900, 0);
+  if (t > k4 - 0.1) { const s = pop(t, k4 - 0.1); ctx.save(); ctx.translate(780, 1225); ctx.scale(s, s); badge('IT CAN’T', 0, 0, 38, 'rgba(255,59,59,0.97)', '#fff'); ctx.restore(); }
+  ctx.restore();
+  txt('metabolism scales with mass^0.75 → 27^0.75 ≈ 12', 540, 1305, 20, 'rgba(200,220,230,0.8)', 'center', 800, 4);
+}
+function stocksPanel(t) {
+  const a = win(t, ST.collapse + 0.1, T.mapIn + 0.2, 0.4, 0.4); if (a <= 0) return;
+  panelBox(60, 520, 960, 720, a); ctx.save(); ctx.globalAlpha = a;
+  txt('PREY POPULATIONS', 100, 580, 36, '#fff', 'left', 900, 0); txt('ILLUSTRATIVE', 980, 580, 22, '#9fbccb', 'right', 800, 0);
+  const x0 = 120, x1 = 960, y0 = 640, y1 = 1150; ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.lineTo(x1, y1); ctx.stroke();
+  txt('WEEK 0', x0, y1 + 30, 20, '#9fbccb', 'left', 800, 0); txt('WEEK 8', x1, y1 + 30, 20, '#9fbccb', 'right', 800, 0); txt('100%', x0 - 8, y0, 18, '#9fbccb', 'right', 800, 0);
+  const prog = clamp((t - ST.collapse - 0.3) / 5.0);
+  const L = [['TUNA', ORG, 0.18, Wd('collapse', 'tuna')], ['SEALS', '#e9eef2', 0.3, Wd('collapse', 'seals')], ['SEA TURTLES', TEAL, 0.12, Wd('collapse', 'sea', 1)]];
+  L.forEach(([name, col, fin, tw0], li) => { ctx.strokeStyle = col; ctx.lineWidth = t > tw0 && t < tw0 + 0.8 ? 10 : 7; ctx.beginPath(); let last;
+    for (let i = 0; i <= 80; i++) { const u = i / 80; if (u > prog) break; const v = fin + (1 - fin) * Math.exp(-Math.pow(u * (2.2 + li * 0.5), 2)) + 0.015 * Math.sin(u * 30 + li); const x = lerp(x0, x1, u), y = lerp(y1, y0, v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); last = { x, y, v }; }
+    ctx.stroke(); if (last && t > tw0 - 0.2) { const s = pop(t, tw0 - 0.2); ctx.save(); ctx.translate(Math.min(last.x, 820), last.y - 26); ctx.scale(s, s); badge(name + ' −' + Math.round((1 - last.v) * 100) + '%', 0, 0, 24, col, '#111', 1, 'center', 12, 40); ctx.restore(); } });
+  ctx.restore();
+}
+function bitesPanel(t) {
+  const a = win(t, ST.bites + 0.2, T.boat - 2.6, 0.4, 0.4); if (a <= 0) return;
+  const k = ease((t - Wd('whatif', 'six')) / 1.2); // morph to estimate
+  panelBox(50, 400, 980, 930, a); ctx.save(); ctx.globalAlpha = a;
+  txt(k < 0.5 ? 'UNPROVOKED SHARK BITES · 2025' : 'WHAT-IF ESTIMATE · YEAR 1', 90, 460, 36, k < 0.5 ? '#fff' : ORG, 'left', 900, 0);
+  txt(k < 0.5 ? 'REAL DATA · INTERNATIONAL SHARK ATTACK FILE' : 'ROUGH ESTIMATE · NOT REAL DATA', 90, 505, 22, k < 0.5 ? '#8fb3c4' : '#ffbf7a', 'left', 800, 0);
+  const real = { us: 25, au: 21, bs: 5, nz: 3, za: 1, mz: 1, gb: 0, ca: 0, no: 0 }; const est = { us: 150, au: 126, bs: 30, nz: 18, za: 6, mz: 6, gb: 12, ca: 10, no: 8 };
+  const names = { us: 'USA', au: 'AUSTRALIA', bs: 'BAHAMAS', nz: 'NEW ZEALAND', za: 'SOUTH AFRICA', mz: 'MOZAMBIQUE', gb: 'UK', ca: 'CANADA', no: 'NORWAY' };
+  const rowsR = ['us', 'au', 'bs', 'nz', 'za', 'mz'], rowsE = ['us', 'au', 'bs', 'nz', 'gb', 'ca', 'no', 'za'];
+  const keys = [...new Set([...rowsR, ...rowsE])]; const mx = lerp(25, 150, k);
+  keys.forEach(c => { const iR = rowsR.indexOf(c), iE = rowsE.indexOf(c); const yR = iR < 0 ? 1400 : 600 + iR * 88, yE = iE < 0 ? 1400 : 600 + iE * 88; const y = lerp(yR, yE, k);
+    const v = lerp(real[c], est[c], k); const ra = iR < 0 ? k : (iE < 0 ? 1 - k : 1); if (ra <= 0.01 || y > 1300) return;
+    const tin = ST.bites + 0.3 + (iR < 0 ? 0 : iR * 0.08); const grow = easeOut((t - tin) / 0.6) ; ctx.save(); ctx.globalAlpha *= ra * ss(tin - 0.1, tin + 0.2, t);
+    ctx.drawImage(FLAGS[c], 90, y - 22, 58, 44); txt(names[c], 165, y, 26, '#fff', 'left', 900, 0);
+    const bw = 520 * v / mx * grow; const hl = (c === 'us' && t > Wd('bites', 'us') && t < Wd('bites', 'us') + 1.2) || (c === 'au' && t > Wd('bites', 'australia') && t < Wd('bites', 'australia') + 1.2) || (c === 'bs' && t > Wd('bites', 'bahamas') && t < Wd('bites', 'bahamas') + 1.2);
+    rr(430, y - 22, Math.max(4, bw), 44, 8); ctx.fillStyle = k > 0.5 ? (iR < 0 ? RED : ORG) : (hl ? YEL : '#6fc3e0'); ctx.fill(); txt(fmt(v * grow), 440 + bw + 8, y, 30, '#fff', 'left', 900, 0); if (iR < 0 && k > 0.6) badge('NEW', 990, y, 18, RED, '#fff', 1, 'right', 10, 30); ctx.restore(); });
+  // totals
+  const tot = lerp(65, 420, k); txt('WORLD TOTAL', 90, 1290, 30, '#cfe3ee', 'left', 900, 0); txt(fmt(tot), 430, 1290, 50, k > 0.5 ? RED : '#fff', 'left', 900, 0);
+  txt(k < 0.5 ? '9 FATAL' : 'MOST FATAL', 990, 1290, 30, k < 0.5 ? '#ffb3b3' : RED, 'right', 900, 0);
+  const sb = Wd('whatif', 'small'); if (t > sb - 0.1) { const s = pop(t, sb - 0.1); ctx.save(); ctx.translate(540, 335); ctx.scale(s, s); badge('NO SUCH THING AS A SMALL BITE', 0, 0, 34, 'rgba(255,59,59,0.97)', '#fff'); ctx.restore(); }
+  ctx.restore();
+}
+function popPanel(t) {
+  const a = win(t, ST.crash + 0.1, ST.us, 0.4, 0.4); if (a <= 0) return;
+  panelBox(60, 470, 960, 820, a); ctx.save(); ctx.globalAlpha = a;
+  txt('SHARKS ON EARTH', 100, 530, 36, '#fff', 'left', 900, 0); txt('BOOM, THEN BUST', 980, 530, 24, '#9fbccb', 'right', 800, 0);
+  const x0 = 140, x1 = 960, y0 = 600, y1 = 1160; const vmax = 3.2; const Y = v => lerp(y1, y0, v / vmax);
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.lineTo(x1, y1); ctx.stroke();
+  for (let yr = 0; yr <= 5; yr++) txt('YR ' + yr, lerp(x0, x1, yr / 5), y1 + 30, 20, '#9fbccb', 'center', 800, 0);
+  // today line
+  ctx.setLineDash([12, 10]); ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x0, Y(1.4)); ctx.lineTo(x1, Y(1.4)); ctx.stroke(); ctx.setLineDash([]); txt('TODAY 1.4B', x1, Y(1.4) - 22, 22, '#fff', 'right', 900, 0);
+  const prog = clamp((t - ST.crash - 0.3) / (Wd('end', 'today') - ST.crash + 0.2));
+  const prey = u => 1.0 * Math.exp(-Math.pow(u * 3.2, 2)) * 2.9 + 0.12; const sharkV = u => { const boom = 2.8 + 0.25 * Math.sin(Math.min(u, 0.2) / 0.2 * Math.PI); const crash = 2.8 - (2.8 - 0.9) * ss(0.25, 0.85, u); return u < 0.2 ? boom : crash; };
+  const line = (f, col, wdt) => { ctx.strokeStyle = col; ctx.lineWidth = wdt; ctx.beginPath(); let last; for (let i = 0; i <= 120; i++) { const u = i / 120; if (u > prog) break; const x = lerp(x0, x1, u), y = Y(f(u)); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); last = { x, y }; } ctx.stroke(); return last; };
+  const lp = line(prey, '#7fd6ff', 6); const ls = line(sharkV, RED, 9);
+  if (lp) txt('PREY', Math.min(lp.x + 12, 900), lp.y, 22, '#7fd6ff', 'left', 900, 4);
+  if (ls) sharkIcon(ls.x, ls.y - 4, 64, '#fff', 1, 1);
+  const fw = Wd('end', 'fewer'); if (t > fw) { const s = pop(t, fw); ctx.save(); ctx.translate(560, 1050); ctx.scale(s, s); badge('FEWER THAN TODAY', 0, 0, 40, 'rgba(255,59,59,0.97)', '#fff'); ctx.restore(); }
+  const st = Wd('crash', 'starve'); if (t > st && t < ST.end + 0.5) { ctx.save(); ctx.globalAlpha *= win(t, st, ST.end + 0.4); badge('THEY STARVE', 700, 700, 36, 'rgba(255,212,0,0.97)', '#111'); ctx.restore(); }
+  ctx.restore();
+}
+function usPanel(t) {
+  const a = win(t, ST.us + 0.2, ST.cta, 0.4, 0.4); if (a <= 0) return;
+  const k = Wd('us', 'us'), k2 = Wd('us', 'hundred');
+  if (t > k - 0.1) { const s = pop(t, k - 0.1); ctx.save(); ctx.globalAlpha = a; ctx.translate(540, 640); ctx.scale(s, s); txt('THE DEADLIEST PREDATOR', 0, -40, 44, '#fff', 'center', 900, 8); txt('IN THE OCEAN: US', 0, 30, 62, RED, 'center', 900, 10); ctx.restore(); }
+  if (t > k2 - 0.2) { panelBox(90, 820, 900, 270, a); ctx.save(); ctx.globalAlpha = a; txt('SHARKS KILLED BY HUMANS EVERY YEAR', 540, 875, 30, '#cfe3ee', 'center', 900, 0); const v = 100e6 * easeOut((t - k2 + 0.2) / 1.0); txt('~' + fmt(v), 540, 965, 86, '#fff', 'center', 900, 0); txt('REAL ESTIMATE · WORM ET AL. 2013, MARINE POLICY', 540, 1050, 20, '#8fb3c4', 'center', 800, 0); ctx.restore(); }
+}
+
+// =====================================================================
+//  HEADER & CHIPS
+// =====================================================================
+function sharkCount(t) { if (t < T.hookTwice) return 1.4; if (t < ST.crash) return lerp(1.4, 2.8, easeOut((t - T.hookTwice) / 0.8));
+  const u = clamp((t - ST.crash - 0.3) / (Wd('end', 'today') - ST.crash + 0.2)); return u < 0.25 ? 2.8 : lerp(2.8, 0.9, ss(0.25, 0.85, u)); }
+function stage(t) {
+  const S = [[0, 'DAY 0'], [ST.count, 'REAL WORLD'], [ST.size, 'DAY 1'], [ST.hunger, 'WEEK 1'], [ST.collapse, 'WEEK 3'], [T.mapIn, 'MONTH 2'], [ST.cold, 'MONTH 4'], [ST.rivers, 'MONTH 6'], [ST.coast, 'YEAR 1'], [ST.bites, 'REAL DATA · 2025'], [Wd('whatif', 'six') - 0.3, 'YEAR 1 · ESTIMATE'], [ST.beaches, 'YEAR 1'], [ST.crash, 'YEAR 2'], [Wd('end', 'within'), 'YEAR 5'], [ST.us, 'REAL WORLD'], [ST.cta, '']];
+  let s = S[0]; for (const x of S) if (t >= x[0]) s = x; return s; }
+function header(t) {
+  rr(18, 36, 1044, 150, 20); ctx.fillStyle = 'rgba(4,12,20,0.86)'; ctx.fill();
+  txt('WHAT IF SHARKS GOT 3× BIGGER', 44, 84, 40, '#fff', 'left', 900, 0); txt('AND DOUBLED IN NUMBER?', 44, 132, 40, TEAL, 'left', 900, 0);
+  const [s0, lab] = stage(t); if (lab) { const real = lab.startsWith('REAL'); const pp = pop(t, s0, 0.3); ctx.save(); ctx.translate(1040, 110); ctx.scale(pp || 1, pp || 1); badge(lab, 0, 0, real ? 22 : 30, real ? 'rgba(53,224,208,0.95)' : 'rgba(255,59,59,0.95)', real ? '#04131c' : '#fff', 1, 'right', 16, 54); ctx.restore(); }
+  // shark counter strip
+  if (t < ST.us) { const v = sharkCount(t); rr(18, 196, 1044, 70, 16); ctx.fillStyle = 'rgba(4,12,20,0.78)'; ctx.fill(); sharkIcon(80, 233, 70, TEAL, 1, 1);
+    txt('SHARKS ON EARTH', 130, 232, 26, '#cfe3ee', 'left', 900, 0); txt(v.toFixed(1) + ' BILLION', 1040, 232, 34, v > 1.45 ? TEAL : (v < 1.35 ? RED : '#fff'), 'right', 900, 0);
+    const bw = 360; rr(430, 220, bw, 24, 12); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill(); rr(430, 220, bw * v / 3.0, 24, 12); ctx.fillStyle = v > 1.45 ? TEAL : (v < 1.35 ? RED : '#9fb3bf'); ctx.fill(); ctx.fillStyle = '#fff'; ctx.fillRect(430 + bw * 1.4 / 3 - 1, 214, 3, 36); }
+}
+function footChip(t, sh) { if (!sh || !sh.credit) return; const a = ss(sh.t0, sh.t0 + 0.3, t); ctx.save(); ctx.globalAlpha = a * 0.92; badge('REAL FOOTAGE · ' + sh.label, 30, 300, 20, 'rgba(0,0,0,0.6)', '#fff', 1, 'left', 14, 36); ctx.restore(); }
+
+// =====================================================================
+//  FRAME
+// =====================================================================
+window.renderFrame = async (t) => {
+  ctx.clearRect(0, 0, W, H);
+  const m3 = scene3D(t); const sh = shotAt(t);
+  const mapOn = t >= T.mapIn && t < ST.coast;
+  if (m3) renderSea(t, m3);
+  else if (mapOn) drawMap(t);
+  else if (sh) await drawFootage(sh, t);
+  else { ctx.fillStyle = '#021019'; ctx.fillRect(0, 0, W, H); }
+  // overlays per beat
+  if (t < ST.count) { // hook stamps
+    const s1 = pop(t, 0.05, 0.25); if (s1) { ctx.save(); ctx.translate(540, 640); ctx.scale(s1, s1); txt('3× BIGGER', 0, 0, 130, '#fff', 'center', 900, 14); ctx.restore(); }
+    if (t > T.hookTwice - 0.1) { const s2 = pop(t, T.hookTwice - 0.1, 0.25); ctx.save(); ctx.translate(540, 800); ctx.scale(s2, s2); txt('2× MORE', 0, 0, 130, TEAL, 'center', 900, 14); ctx.restore(); }
+  }
+  countPanel(t);
+  if (m3 === 'lineup') lineupLabels(t);
+  hungerPanel(t); stocksPanel(t); bitesPanel(t); popPanel(t); usPanel(t);
+  if (t >= ST.coast && t < ST.bites) { const k = Wd('coast', 'right'); if (t > k - 0.1) { const s = pop(t, k - 0.1); ctx.save(); ctx.translate(540, 1000); ctx.scale(s, s); badge('RIGHT WHERE WE SWIM', 0, 0, 46, 'rgba(255,59,59,0.96)', '#fff'); ctx.restore(); } }
+  if (t >= ST.beaches && t < T.boat) { [['BEACH CLOSED · FLORIDA', Wd('beaches', 'florida'), 620, -0.06], ['BEACH CLOSED · SYDNEY', Wd('beaches', 'sydney'), 780, 0.05], ['NO SURFING', Wd('beaches', 'surfers'), 940, -0.03]].forEach(([s, t0, y, rot]) => { if (t < t0 - 0.1) return; const p = pop(t, t0 - 0.1); ctx.save(); ctx.translate(540, y); ctx.rotate(rot); ctx.scale(p, p); rr(-330, -52, 660, 104, 14); ctx.fillStyle = 'rgba(220,30,30,0.95)'; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 6; ctx.stroke(); txt(s, 0, 4, 40, '#fff', 'center', 900, 0); ctx.restore(); }); }
+  if (m3 === 'boat') { const a = ss(T.boat, T.boat + 0.3, t); ctx.save(); ctx.globalAlpha = a; badge('8 m FISHING BOAT vs 13.5 m SHARK', 540, 1180, 30, 'rgba(0,0,0,0.65)', '#fff'); ctx.restore(); }
+  if (m3 === 'cta') { const a = ss(ST.cta - 0.1, ST.cta + 0.4, t); ctx.save(); ctx.globalAlpha = a; rr(90, 520, 900, 170, 22); ctx.fillStyle = 'rgba(255,212,0,0.96)'; ctx.fill(); txt('WHICH SHARK SCARES YOU', 540, 576, 46, '#111', 'center', 900, 0); txt('MOST AT 3×?  COMMENT ⬇', 540, 638, 46, '#111', 'center', 900, 0); ctx.restore(); }
+  footChip(t, (!m3 && !mapOn) ? sh : null);
+  header(t);
+  return out.toDataURL('image/jpeg', 0.92);
+};
+function lineupLabels(t) {
+  const lab = (obj, text, sub, t0, col = '#fff', dy = -1, endT = ST.hunger) => { if (t < t0 - 0.1 || !obj.visible) return; const bb = new THREE.Box3().setFromObject(obj); const top = new THREE.Vector3((bb.min.x + bb.max.x) / 2, dy > 0 ? bb.min.y : bb.max.y, (bb.min.z + bb.max.z) / 2); const p = worldToScreen(top);
+    const a = ss(t0 - 0.1, t0 + 0.25, t) * (1 - ss(endT - 0.3, endT, t)); ctx.save(); ctx.globalAlpha = a; const y = clamp(p.y + dy * 40, 300, 1330); txt(text, clamp(p.x, 200, 880), y, 34, col, 'center', 900, 7); if (sub) txt(sub, clamp(p.x, 200, 880), y + 38, 24, '#e6f3fa', 'center', 800, 5); ctx.restore(); };
+  const pb = t > ST.whale + 1.2;
+  if (!pb) { const g = ease((t - T.grow) / 1.1); lab(A.gw, 'GREAT WHITE', (lerp(4.5, 13.5, g)).toFixed(1) + ' m', T.gwWord, g > 0.5 ? RED : '#fff', -1, ST.whale + 0.6);
+    { const p = worldToScreen(diverHolder.position.clone().add(new THREE.Vector3(0.9, 0.5, 0))); const a = ss(T.gwWord + 0.3, T.gwWord + 0.6, t) * (1 - ss(ST.whale + 0.3, ST.whale + 0.6, t)); ctx.save(); ctx.globalAlpha = a; txt('YOU · 1.8 m', clamp(p.x, 160, 920), clamp(p.y + 80, 330, 1300), 30, '#fff', 'center', 900, 6); ctx.restore(); }
+    lab(bus, 'SCHOOL BUS · 12 m', null, T.busW, YEL, 1, ST.whale + 0.6);
+    if (t > T.tons - 0.1 && t < ST.whale + 0.4) { const s = pop(t, T.tons - 0.1); ctx.save(); ctx.globalAlpha = 1 - ss(ST.whale, ST.whale + 0.4, t); ctx.translate(540, 1240); ctx.scale(s, s); badge('1 TON → 27 TONS', 0, 0, 44, 'rgba(255,59,59,0.96)', '#fff'); ctx.restore(); }
+    // equation at the start
+    const e0 = Wd('size', 'three'); if (t > e0 - 0.1 && t < T.gwWord) { const a = win(t, e0, T.gwWord, 0.3, 0.3); ctx.save(); ctx.globalAlpha = a; panelBox(110, 470, 860, 300, 1); txt('3× LONGER', 540, 540, 60, '#fff', 'center', 900, 0); if (t > Wd('size', 'twenty')) txt('= 3 × 3 × 3 = 27× HEAVIER', 540, 640, 46, RED, 'center', 900, 0); txt('(length × width × height)', 540, 715, 26, '#9fbccb', 'center', 800, 0); ctx.restore(); }
+  } else {
+    lab(A.ws, 'WHALE SHARK (3×)', '36 m', ST.whale + 0.8, TEAL, -1); lab(A.bw, 'BLUE WHALE', '~30 m (record)', T.blue, '#bcdcff', -1); lab(A.gw, 'GREAT WHITE (3×)', '13.5 m', ST.whale + 1.4, RED, -1); lab(bus, 'SCHOOL BUS 12 m', null, ST.whale + 1.4, YEL, 1); { const p = worldToScreen(diverHolder.position.clone().add(new THREE.Vector3(0.9, 0, 0))); const a = ss(ST.whale + 1.5, ST.whale + 1.9, t) * (1 - ss(ST.hunger - 0.3, ST.hunger, t)); ctx.save(); ctx.globalAlpha = a; txt('◀ YOU · 1.8 m', p.x + 30, p.y, 30, '#fff', 'left', 900, 6); ctx.restore(); }
+    const lw = T.largest; if (t > lw - 0.1) { const s = pop(t, lw - 0.1); ctx.save(); ctx.translate(540, 1255); ctx.scale(s, s); badge('LARGEST ANIMAL EVER', 0, 0, 46, 'rgba(53,224,208,0.97)', '#04131c'); ctx.restore(); }
+  }
+}
+window.ST = ST; window.T = T; window.READY = true;
+</script></body></html>

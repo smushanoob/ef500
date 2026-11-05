@@ -1,0 +1,19 @@
+[
+ {"id": "hook", "say": "Overnight, every shark on Earth gets three times bigger. And there are suddenly twice as many of them.", "gap": 0.3},
+ {"id": "count", "say": "Nobody has counted every shark. But humans kill about a hundred million a year, roughly seven percent of them. That means around one point four billion sharks. Now it's almost three billion.", "gap": 0.3},
+ {"id": "size", "say": "And three times longer means twenty seven times heavier. A great white goes from four and a half meters to thirteen and a half. Longer than a school bus. Twenty seven tons.", "gap": 0.3},
+ {"id": "whale", "say": "The whale shark hits thirty six meters, bigger than any blue whale ever measured. The largest animal that has ever lived.", "gap": 0.3},
+ {"id": "hunger", "say": "But bigger bodies burn more fuel. Each shark now needs about twelve times more food. Twice the sharks, so the ocean has to feed them twenty four times over. It can't.", "gap": 0.3},
+ {"id": "collapse", "say": "Within weeks, fish stocks start to crash. Tuna, seals and sea turtles get eaten faster than they can breed. So the sharks start to move.", "gap": 0.3},
+ {"id": "food", "say": "They follow the food. Great whites swarm the seal colonies of South Africa, California and Australia. Tiger sharks follow the humpback whales to their calving grounds.", "gap": 0.3},
+ {"id": "cold", "say": "And here's the twist. Big bodies hold heat. Cold water stops nobody now. Sharks push north into the North Sea, Norway and Alaska.", "gap": 0.3},
+ {"id": "rivers", "say": "Bull sharks already swim up rivers. One was caught over a thousand miles up the Mississippi. Now picture one seven meters long.", "gap": 0.3},
+ {"id": "coast", "say": "And hungry sharks hunt where prey gathers. The shallow coast. Right where we swim.", "gap": 0.3},
+ {"id": "bites", "say": "In twenty twenty five, there were sixty five unprovoked shark bites on the whole planet. The US had twenty five. Australia, twenty one. The Bahamas, five.", "gap": 0.3},
+ {"id": "whatif", "say": "In this world? Twice the sharks, packed against the coast. Bites could jump six fold, to around four hundred a year. And at thirteen meters, there's no such thing as a small bite.", "gap": 0.3},
+ {"id": "beaches", "say": "Beaches close from Florida to Sydney. Surfers stay out. Small fishing boats get rammed.", "gap": 0.35},
+ {"id": "crash", "say": "But then, the twist. The sharks eat the ocean empty. And then they starve.", "gap": 0.3},
+ {"id": "end", "say": "Within a few years, giant sharks crash to fewer than there are today. No predator can outgrow its food.", "gap": 0.3},
+ {"id": "us", "say": "Meanwhile, the deadliest predator in the ocean doesn't change. It's us. A hundred million sharks a year.", "gap": 0.35},
+ {"id": "cta", "say": "Which shark would scare you most at three times the size? Tell me in the comments.", "gap": 0.2}
+]
